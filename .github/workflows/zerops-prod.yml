@@ -26,6 +26,6 @@ jobs:
       - name: Deploy web to production
         run: |
           zcli login "$ZEROPS_TOKEN_PROD"
-          zcli push --service-id "mN83MQpHSzO2rH9gOOZ5tg" --setup "webprod"
+          zcli push --service-id "mN83MQpHSzO2rH9gOOZ5tg" --setup "webprodlive"
         env:
           ZEROPS_TOKEN_PROD: ${{ secrets.ZEROPS_TOKEN_PROD }}

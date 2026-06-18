@@ -108,6 +108,55 @@ zerops:
     run:
       base: nginx@1.22
 
+  # webprodlive — PRODUCTION-only web setup (the pid-prod `web` service).
+  # Differs from webprod (stage) in two ways that the promote-to-prod rename forced:
+  #   1. No VITE_API_BASE → frontend uses a RELATIVE /api base (same-origin).
+  #   2. nginx reverse-proxies /api/* (incl. the SSE stream) to the internal `api`
+  #      service, so the API is reachable under the custom domain WITHOUT exposing
+  #      the api publicly and WITHOUT a cross-service ${api_zeropsSubdomain} ref
+  #      (which can't be shared with stage, where the service is named apistage).
+  - setup: webprodlive
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd web && npm install
+        - cd web && npm run build
+      deployFiles: ["web/dist/~"]    # cross-deploy → ship only the built site, flattened to root
+      cache: ["web/node_modules"]
+      # VITE_API_BASE intentionally omitted → import.meta.env.VITE_API_BASE is undefined
+      # → API_BASE = '' → all calls are same-origin (/api/...), proxied below.
+    run:
+      base: nginx@1.22
+      documentRoot: /var/www
+      nginxConfig: |
+        server {
+          listen 80;
+          listen [::]:80;
+          server_name _;
+
+          # Same-origin API: proxy /api/* (REST + the /api/stream SSE feed) to the
+          # internal api service. SSE needs unbuffered, long-lived streaming.
+          location /api/ {
+            proxy_pass http://api:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 3600s;
+            chunked_transfer_encoding off;
+          }
+
+          # SPA: serve built assets, fall back to index.html for client-side routes.
+          location / {
+            root {{.DocumentRoot}};
+            try_files $uri $uri/ /index.html;
+          }
+        }
+
   # =================== WORKER (workerdev / workerstage) ===================
   - setup: workerdev
     build:
