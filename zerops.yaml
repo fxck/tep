@@ -109,32 +109,25 @@ zerops:
       base: nginx@1.22
 
   # webprodlive — PRODUCTION-only web setup (the pid-prod `web` service).
-  # Differs from webprod (stage) in two ways that the promote-to-prod rename forced:
-  #   1. No VITE_API_BASE → frontend uses a RELATIVE /api base (same-origin).
-  #   2. nginx reverse-proxies /api/* (incl. the SSE stream) to the internal `api`
-  #      service, so the API is reachable under the custom domain WITHOUT exposing
-  #      the api publicly and WITHOUT a cross-service ${api_zeropsSubdomain} ref
-  #      (which can't be shared with stage, where the service is named apistage).
+  # Same shape as webprod (plain nginx SPA) but points the SPA at the PROD api's
+  # own public subdomain. This mirrors the dev architecture (webdev → apidev
+  # subdomain, cross-origin; the api sends Access-Control-Allow-Origin: *), which
+  # is proven to work. webprod (stage) keeps ${apistage_zeropsSubdomain}; this
+  # prod-only setup uses ${api_zeropsSubdomain}, which resolves to the prod `api`
+  # service. (A web-tier nginx reverse-proxy was tried but a static proxy_pass
+  # caches the api IP at boot and 502s after the api restarts — subdomain is robust.)
   - setup: webprodlive
     build:
       base: nodejs@24
       buildCommands:
         - cd web && npm install
         - cd web && npm run build
-        # Ship the nginx site template alongside the built assets so it lands in
-        # /var/www (deployFiles flattens web/dist/~) and siteConfigPath can find it.
-        - cp web/zerops-site.conf.tmpl web/dist/zerops-site.conf.tmpl
       deployFiles: ["web/dist/~"]    # cross-deploy → ship only the built site, flattened to root
       cache: ["web/node_modules"]
-      # VITE_API_BASE intentionally omitted → import.meta.env.VITE_API_BASE is undefined
-      # → API_BASE = '' → all calls are same-origin (/api/...), proxied by the template.
+      envVariables:
+        VITE_API_BASE: ${api_zeropsSubdomain}
     run:
       base: nginx@1.22
-      documentRoot: /var/www
-      # Custom nginx config (Zerops mechanism): a template under /var/www. It keeps
-      # the platform default server block + SPA fallback and adds a /api/ reverse
-      # proxy (incl. SSE) to the internal `api` service. See web/zerops-site.conf.tmpl.
-      siteConfigPath: zerops-site.conf.tmpl
 
   # =================== WORKER (workerdev / workerstage) ===================
   - setup: workerdev
