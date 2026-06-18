@@ -1,0 +1,207 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* =========================================================================
+   Design tokens — refined dark "transit console" theme.
+   shadcn-style HSL tokens drive the React chrome; the legacy flat vars
+   (--bg/--card/--text/--muted/--live/--demo) are KEPT because MapLibre
+   popups (.vp in style.css) and the vanilla timeMachine module reference
+   them directly. Both must stay defined.
+   ========================================================================= */
+:root {
+  color-scheme: dark;
+
+  /* shadcn tokens (dark, default) — refreshed foundation ink ramp */
+  --background: 222 24% 7%;
+  --foreground: 213 20% 95%;
+  --surface: 222 20% 10%;            /* canonical floating-panel surface */
+  --surface-2: 222 18% 14%;          /* raised rows / chips inside a panel */
+  --card: 222 20% 10%;               /* HSL token only — flat --card stays in style.css (collision breaks panels) */
+  --card-foreground: 213 20% 95%;
+  --popover: 222 20% 10%;
+  --popover-foreground: 213 20% 95%;
+  --primary: 353 74% 46%;            /* PID red #D2192C — tram mode swatch ONLY, never chrome accent */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 217 24% 15%;
+  --secondary-foreground: 213 20% 95%;
+  --muted: 217 22% 14%;
+  --muted-foreground: 215 12% 62%;
+  --accent: 211 100% 56%;            /* azure — the ONE chrome accent (red retired as accent) */
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 214 14% 22%;
+  --input: 214 14% 24%;
+  --ring: 211 100% 56%;              /* azure focus ring */
+  --live: 145 63% 49%;              /* live green */
+  --warn: 41 96% 50%;               /* amber */
+  --radius: 0.875rem;
+
+  /* ── Two-axis color system ──────────────────────────────────────────────
+     MODE = identity (vehicle/line fill). STATUS = attention. Hard law: red means
+     LATE everywhere; tram red is a mode swatch only. Mode colors are canonical
+     hex (mirror format.js MODE_COLORS). Status colors alias the foundation HSL
+     tokens so there is exactly ONE green/amber/red; "early" is azure, not red. */
+  --mode-tram: #D2192C;
+  --mode-metro: #00A562;
+  --mode-bus: #007DA8;
+  --mode-train: #1A66B0;
+  --mode-trolley: #8E44AD;
+  --mode-other: #7A8290;
+  --status-ontime: hsl(var(--live));
+  --status-late: hsl(var(--warn));
+  --status-verylate: hsl(var(--destructive));
+  --status-early: hsl(var(--accent));
+
+  /* elevation */
+  --shadow-1: 0 8px 30px -12px rgba(0,0,0,0.55), 0 0 0 1px hsl(var(--border) / 0.6);
+  --shadow-2: 0 18px 60px -16px rgba(0,0,0,0.7), 0 0 0 1px hsl(var(--border) / 0.7);
+
+  /* legacy flat vars for the vanilla timeMachine module ONLY. NOTE: do NOT define
+     --card here — it collides with the shadcn HSL token above and breaks every
+     hsl(var(--card)) panel surface. timeMachine uses var(--card, <fallback>). */
+  --bg: #070b14;
+  --text: #e8edf6;
+  --demo: #f0b100;
+}
+
+/* Day theme (the React theme toggle sets data-theme on <html>) */
+:root[data-theme='day'] {
+  color-scheme: light;
+  --background: 210 24% 97%;
+  --foreground: 222 30% 12%;
+  --surface: 0 0% 100%;
+  --surface-2: 214 28% 95%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 30% 12%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 30% 12%;
+  --secondary: 214 28% 90%;
+  --secondary-foreground: 222 30% 14%;
+  --muted: 214 26% 90%;
+  --muted-foreground: 215 16% 40%;
+  --accent: 211 92% 46%;             /* slightly deeper azure for light bg */
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 47%;
+  --border: 214 16% 86%;
+  --input: 214 16% 84%;
+  --ring: 211 92% 46%;
+  /* --mode-* / --status-* aliases inherit from :root (hex is theme-independent;
+     status aliases follow the retuned --live/--warn/--destructive/--accent). */
+  --shadow-1: 0 8px 30px -14px rgba(15,30,60,0.22), 0 0 0 1px hsl(var(--border) / 0.8);
+  --shadow-2: 0 18px 60px -18px rgba(15,30,60,0.3), 0 0 0 1px hsl(var(--border) / 0.9);
+
+  --bg: #eef2f7;
+  --text: #1a2333;
+}
+
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: hsl(var(--foreground));
+  font-family: 'Inter var', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+#map { position: absolute; inset: 0; }
+
+/* React chrome mount — overlays the map; only actual panels capture pointers. */
+#ui-root {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+#ui-root > * { pointer-events: auto; }
+
+/* ---------------------------------------------------------------------------
+   FULL reset scoped to the React chrome. Tailwind's global preflight is OFF (so
+   it can't disturb MapLibre's DOM), so we replicate preflight's essentials here.
+   CRITICAL: every reset selector is wrapped in :where() so it carries ZERO
+   specificity. Without that, `.pid-ui button {…}` (specificity 0,1,1) OUTRANKS
+   Tailwind utilities like `.text-[11px]`/`.px-2`/`.bg-muted` (0,1,0) — and since
+   Tailwind 3 FLATTENS `@layer` into plain CSS (no native cascade layers survive
+   the build), layer order can't save us; specificity decides, and the reset wins,
+   so every size/padding/background utility on a <button>/<input> is ignored
+   (oversized plain-text chips, no backgrounds — the "unstyled" look). :where()
+   makes the reset (0,0,0), so ANY single utility (0,1,0) beats it. This is exactly
+   how Tailwind's own preflight scopes its reset. `.pid-ui` itself (the base
+   font/line-height) stays un-wrapped so it remains the inheritance base.
+   --------------------------------------------------------------------------- */
+@layer base {
+  :where(.pid-ui, .pid-ui *, .pid-ui *::before, .pid-ui *::after) {
+    box-sizing: border-box;
+    border-width: 0;
+    border-style: solid;
+    border-color: hsl(var(--border));   /* `border` utility → subtle token color, not currentColor */
+  }
+  .pid-ui { -webkit-font-smoothing: antialiased; line-height: 1.5; color: hsl(var(--foreground)); font-size: 14px; }
+  :where(.pid-ui h1, .pid-ui h2, .pid-ui h3, .pid-ui h4, .pid-ui h5, .pid-ui h6,
+  .pid-ui p, .pid-ui figure, .pid-ui blockquote, .pid-ui dl, .pid-ui dd) { margin: 0; font-size: inherit; font-weight: inherit; }
+  :where(.pid-ui ul, .pid-ui ol) { margin: 0; padding: 0; list-style: none; }
+  :where(.pid-ui a) { color: inherit; text-decoration: inherit; }
+  :where(.pid-ui img, .pid-ui svg, .pid-ui video, .pid-ui canvas) { display: block; vertical-align: middle; }
+  :where(.pid-ui button, .pid-ui input, .pid-ui select, .pid-ui textarea, .pid-ui optgroup) {
+    font: inherit; color: inherit; margin: 0; letter-spacing: inherit;
+  }
+  :where(.pid-ui button, .pid-ui [role='button']) { cursor: pointer; background-color: transparent; background-image: none; padding: 0; }
+  :where(.pid-ui :disabled) { cursor: default; }
+  :where(.pid-ui input::placeholder, .pid-ui textarea::placeholder) { color: hsl(var(--muted-foreground)); opacity: 1; }
+  /* Real keyboard focus ring (a11y floor). Pointer focus stays quiet; only
+     :focus-visible (keyboard) draws the azure ring. */
+  :where(.pid-ui :focus-visible) { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+}
+
+/* ONE canonical floating surface. `.surface` is the name; `.glass` is kept as an
+   alias so existing markup needn't change. Alpha ~0.90 (NOT blur-alone — that left
+   text low-contrast over the light positron basemap); @supports fallback ~0.97 when
+   backdrop-filter is unavailable. */
+.surface, .glass {
+  background: hsl(var(--surface) / 0.90);
+  -webkit-backdrop-filter: blur(26px) saturate(140%);
+  backdrop-filter: blur(26px) saturate(140%);
+  border: 1px solid hsl(var(--border) / 0.6);
+}
+:root[data-theme='day'] .surface, :root[data-theme='day'] .glass {
+  background: hsl(var(--surface) / 0.92);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .surface, .glass { background: hsl(var(--surface) / 0.97); }
+}
+
+/* Respect reduced-motion: kill chrome transitions/animations. (The engine zeroes
+   camera eases via view.reducedMotion; the per-vehicle interpolation loop — the
+   product itself — is never gated.) */
+@media (prefers-reduced-motion: reduce) {
+  .pid-ui *, .pid-ui *::before, .pid-ui *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Thin custom scrollbars inside chrome panels. */
+.pid-ui ::-webkit-scrollbar { width: 8px; height: 8px; }
+.pid-ui ::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / 0.35); border-radius: 999px; }
+.pid-ui ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.55); }
+.pid-ui ::-webkit-scrollbar-track { background: transparent; }
+
+/* tabular numerals for live stats */
+.tnum { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum'; }
+
+/* MapLibre control polish to match the dark chrome */
+.maplibregl-ctrl-group {
+  background: hsl(var(--surface) / 0.9) !important;
+  border: 1px solid hsl(var(--border) / 0.7) !important;
+  border-radius: 14px !important;
+  overflow: hidden;
+  backdrop-filter: blur(26px) saturate(140%);
+  box-shadow: var(--shadow-1) !important;
+}
+.maplibregl-ctrl-group button { background: transparent !important; }
+.maplibregl-ctrl-group button + button { border-top: 1px solid hsl(var(--border) / 0.6) !important; }
+.maplibregl-ctrl-group button span { filter: invert(0.92); }
+:root[data-theme='day'] .maplibregl-ctrl-group button span { filter: none; }
+.maplibregl-ctrl-attrib { background: hsl(var(--card) / 0.7) !important; border-radius: 8px 0 0 0; }
+.maplibregl-ctrl-attrib a { color: hsl(var(--muted-foreground)) !important; }

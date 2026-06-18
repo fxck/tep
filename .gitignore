@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# build output
+web/dist/
+**/dist/
+
+# logs / scratch
+*.log
+zcp-dev-server.log
+probe*.mjs
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# local env — NEVER commit secrets (GOLEMIO_API_KEY etc. live as Zerops service secrets)
+.env
+*.local

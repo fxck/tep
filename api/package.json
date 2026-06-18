@@ -1,0 +1,17 @@
+{
+  "name": "pid-api",
+  "private": true,
+  "type": "module",
+  "version": "1.1.0",
+  "description": "PID live-map API: Valkey-cached vehicle snapshots over REST + SSE, plus GTFS route shapes & stops from PostgreSQL.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.12.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.13.1"
+  }
+}

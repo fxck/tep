@@ -1,0 +1,13 @@
+{
+  "name": "pid-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Tep — Prague public-transport live map. Monorepo: api (Node + Valkey/PostgreSQL/ClickHouse), web (Vite + MapLibre + Three.js), worker (Golemio GTFS-RT poller).",
+  "scripts": {
+    "install:all": "cd api && npm install && cd ../web && npm install && cd ../worker && npm install",
+    "build:web": "cd web && npm run build",
+    "dev:api": "cd api && node src/index.js",
+    "dev:worker": "cd worker && node src/index.js",
+    "dev:web": "cd web && npm run dev"
+  }
+}

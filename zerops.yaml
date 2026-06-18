@@ -1,0 +1,174 @@
+# PID monorepo — one repo, six setups, all driven by THIS root zerops.yaml.
+#
+# Deploy model (see README.md):
+#   DEV setups (apidev/webdev/workerdev) SELF-DEPLOY, so Zerops requires
+#   deployFiles: ["."] — the WHOLE monorepo lands on the container (root scripts,
+#   git working tree, all packages intact). Each dev setup only BUILDS + RUNS its
+#   own subdir (cd api && …, serve web/dist, run worker from worker/).
+#
+#   STAGE setups (apiprod/webprod/workerprod) are CROSS-DEPLOYED from their dev
+#   counterpart, so they may ship just the built subdir via the `subdir/~` tilde
+#   (contents flattened to /var/www root) — a lean, prod-clean runtime.
+#
+# Env blocks are copied verbatim from the pre-monorepo per-service zerops.yaml
+# files, so runtime behavior is identical. Service SECRETS (GOLEMIO_API_KEY on
+# the workers, cross-service refs) live on the services, not here — untouched.
+
+zerops:
+  # ===================== API (apidev / apistage) =====================
+  - setup: apidev
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd api && npm install
+      deployFiles: ["."]            # self-deploy → whole monorepo
+      cache: ["api/node_modules"]
+    run:
+      base: nodejs@24
+      ports:
+        - port: 3000
+          httpSupport: true
+      envVariables:
+        CACHE_HOST: ${cache_hostname}
+        CACHE_PORT: ${cache_port}
+        CACHE_PASSWORD: ${cache_password}
+        PG_HOST: ${db_hostname}
+        PG_PORT: ${db_port}
+        PG_USER: ${db_user}
+        PG_PASSWORD: ${db_password}
+        PG_DB: ${db_dbName}
+        CH_HOST: ${analytics_hostname}
+        CH_PORT: ${analytics_portHttp}
+        CH_USER: ${analytics_user}
+        CH_PASSWORD: ${analytics_password}
+        CH_DB: ${analytics_dbName}
+      start: zsc noop --silent       # dev: real server via zerops_dev_server (workDir /var/www/api)
+
+  - setup: apiprod
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd api && npm install
+      deployFiles: ["api/~"]         # cross-deploy → ship only api/, flattened to root
+      cache: ["api/node_modules"]
+    run:
+      base: nodejs@24
+      ports:
+        - port: 3000
+          httpSupport: true
+      envVariables:
+        CACHE_HOST: ${cache_hostname}
+        CACHE_PORT: ${cache_port}
+        CACHE_PASSWORD: ${cache_password}
+        PG_HOST: ${db_hostname}
+        PG_PORT: ${db_port}
+        PG_USER: ${db_user}
+        PG_PASSWORD: ${db_password}
+        PG_DB: ${db_dbName}
+        CH_HOST: ${analytics_hostname}
+        CH_PORT: ${analytics_portHttp}
+        CH_USER: ${analytics_user}
+        CH_PASSWORD: ${analytics_password}
+        CH_DB: ${analytics_dbName}
+      start: node src/index.js
+      healthCheck:
+        httpGet:
+          port: 3000
+          path: /health
+
+  # ===================== WEB (webdev / webstage) =====================
+  - setup: webdev
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd web && npm install
+        - cd web && npm run build
+      deployFiles: ["."]            # self-deploy → whole monorepo
+      cache: ["web/node_modules"]
+      envVariables:
+        VITE_API_BASE: ${apidev_zeropsSubdomain}
+        # Phase-glTF only (NOT used by v1 procedural meshes): public CDN/base URL of
+        # the `storage` object-storage service. Confirm the key via zerops_env, then uncomment.
+        # VITE_ASSET_BASE: ${storage_apiUrl}
+    run:
+      base: nginx@1.22
+      documentRoot: web/dist         # built site stays under the subdir with [.]
+
+  - setup: webprod
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd web && npm install
+        - cd web && npm run build
+      deployFiles: ["web/dist/~"]    # cross-deploy → ship only the built site, flattened to root
+      cache: ["web/node_modules"]
+      envVariables:
+        VITE_API_BASE: ${apistage_zeropsSubdomain}
+        # VITE_ASSET_BASE: ${storage_apiUrl}
+    run:
+      base: nginx@1.22
+
+  # =================== WORKER (workerdev / workerstage) ===================
+  - setup: workerdev
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd worker && npm install
+      deployFiles: ["."]            # self-deploy → whole monorepo
+      cache: ["worker/node_modules"]
+    run:
+      base: nodejs@24
+      ports:
+        - port: 3000
+          httpSupport: true
+      envVariables:
+        CACHE_HOST: ${cache_hostname}
+        CACHE_PORT: ${cache_port}
+        CACHE_PASSWORD: ${cache_password}
+        PG_HOST: ${db_hostname}
+        PG_PORT: ${db_port}
+        PG_USER: ${db_user}
+        PG_PASSWORD: ${db_password}
+        PG_DB: ${db_dbName}
+        CH_HOST: ${analytics_hostname}
+        CH_PORT: ${analytics_portHttp}
+        CH_USER: ${analytics_user}
+        CH_PASSWORD: ${analytics_password}
+        CH_DB: ${analytics_dbName}
+      start: zsc noop --silent       # dev: real poller via zerops_dev_server (workDir /var/www/worker)
+
+  - setup: workerprod
+    build:
+      base: nodejs@24
+      buildCommands:
+        - cd worker && npm install
+      deployFiles: ["worker/~"]      # cross-deploy → ship only worker/, flattened to root
+      cache: ["worker/node_modules"]
+    run:
+      base: nodejs@24
+      ports:
+        - port: 3000
+          httpSupport: true
+      envVariables:
+        CACHE_HOST: ${cache_hostname}
+        CACHE_PORT: ${cache_port}
+        CACHE_PASSWORD: ${cache_password}
+        PG_HOST: ${db_hostname}
+        PG_PORT: ${db_port}
+        PG_USER: ${db_user}
+        PG_PASSWORD: ${db_password}
+        PG_DB: ${db_dbName}
+        CH_HOST: ${analytics_hostname}
+        CH_PORT: ${analytics_portHttp}
+        CH_USER: ${analytics_user}
+        CH_PASSWORD: ${analytics_password}
+        CH_DB: ${analytics_dbName}
+      start: node src/index.js
+      healthCheck:
+        httpGet:
+          port: 3000
+          path: /health
+      crontab:
+        - timing: "30 3 * * *"
+          command: cd /var/www && node src/ingest-gtfs.js
+          allContainers: false
