@@ -1,0 +1,31 @@
+name: Zerops production release
+on:
+  push:
+    tags: ['v*.*.*']
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zcli
+        run: |
+          curl -sSL https://zerops.io/zcli/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Deploy api to production
+        run: |
+          zcli login "$ZEROPS_TOKEN_PROD"
+          zcli push --service-id "MWAwzZWuRaCdybPuRAozTg" --setup "apiprod"
+        env:
+          ZEROPS_TOKEN_PROD: ${{ secrets.ZEROPS_TOKEN_PROD }}
+      - name: Deploy worker to production
+        run: |
+          zcli login "$ZEROPS_TOKEN_PROD"
+          zcli push --service-id "NxKF7xXHRreCPx5WOsp0Gg" --setup "workerprod"
+        env:
+          ZEROPS_TOKEN_PROD: ${{ secrets.ZEROPS_TOKEN_PROD }}
+      - name: Deploy web to production
+        run: |
+          zcli login "$ZEROPS_TOKEN_PROD"
+          zcli push --service-id "mN83MQpHSzO2rH9gOOZ5tg" --setup "webprod"
+        env:
+          ZEROPS_TOKEN_PROD: ${{ secrets.ZEROPS_TOKEN_PROD }}
