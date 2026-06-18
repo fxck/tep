@@ -121,41 +121,20 @@ zerops:
       buildCommands:
         - cd web && npm install
         - cd web && npm run build
+        # Ship the nginx site template alongside the built assets so it lands in
+        # /var/www (deployFiles flattens web/dist/~) and siteConfigPath can find it.
+        - cp web/zerops-site.conf.tmpl web/dist/zerops-site.conf.tmpl
       deployFiles: ["web/dist/~"]    # cross-deploy → ship only the built site, flattened to root
       cache: ["web/node_modules"]
       # VITE_API_BASE intentionally omitted → import.meta.env.VITE_API_BASE is undefined
-      # → API_BASE = '' → all calls are same-origin (/api/...), proxied below.
+      # → API_BASE = '' → all calls are same-origin (/api/...), proxied by the template.
     run:
       base: nginx@1.22
       documentRoot: /var/www
-      nginxConfig: |
-        server {
-          listen 80;
-          listen [::]:80;
-          server_name _;
-
-          # Same-origin API: proxy /api/* (REST + the /api/stream SSE feed) to the
-          # internal api service. SSE needs unbuffered, long-lived streaming.
-          location /api/ {
-            proxy_pass http://api:3000;
-            proxy_http_version 1.1;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_set_header Connection "";
-            proxy_buffering off;
-            proxy_cache off;
-            proxy_read_timeout 3600s;
-            chunked_transfer_encoding off;
-          }
-
-          # SPA: serve built assets, fall back to index.html for client-side routes.
-          location / {
-            root {{.DocumentRoot}};
-            try_files $uri $uri/ /index.html;
-          }
-        }
+      # Custom nginx config (Zerops mechanism): a template under /var/www. It keeps
+      # the platform default server block + SPA fallback and adds a /api/ reverse
+      # proxy (incl. SSE) to the internal `api` service. See web/zerops-site.conf.tmpl.
+      siteConfigPath: zerops-site.conf.tmpl
 
   # =================== WORKER (workerdev / workerstage) ===================
   - setup: workerdev
