@@ -2,7 +2,10 @@ server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
-    root {{.DocumentRoot}};
+    # Hardcoded (not {{.DocumentRoot}}): a user-supplied siteConfigPath file is used
+    # verbatim — Zerops only template-substitutes its built-in default config, so the
+    # {{...}} placeholder would stay literal and break the SPA root. Matches run.documentRoot.
+    root /var/www;
 
     # Same-origin API: proxy /api/* (REST + the /api/stream SSE feed) to the
     # internal `api` runtime. SSE needs unbuffered, long-lived streaming.
