@@ -27,7 +27,7 @@ function slice(initial) {
 }
 
 // --- live state (engine -> React) -------------------------------------------
-export const stats = slice({ count: 0, src: 'connecting', conn: false, ageMs: null, byMode: null });
+export const stats = slice({ count: 0, src: 'connecting', conn: false, ageMs: null, byMode: null, stale: false });
 export const selected = slice(null);   // { props, follow } | null  (props = propsOf(vehicle))
 export const stop = slice(null);        // { name, lon, lat } | null — the clicked station (StopCard)
 export const filters = slice({

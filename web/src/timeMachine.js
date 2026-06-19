@@ -29,7 +29,7 @@ const VT_PUSH_MS = 180;   // throttle the virtual-clock slice push (~5 Hz) so th
                           // React panel re-renders the clock/scrub a few times a
                           // second, while the map vehicles still animate at 60 fps.
 
-export function initTimeMachine({ map, apiBase, onEnter, onExit, onOpenChange } = {}) {
+export function initTimeMachine({ map, apiBase, onEnter, onExit, onOpenChange, projectOnShape, loadShapes } = {}) {
   apiBase = (apiBase || '').replace(/\/+$/, '');
 
   // --- replay state ----------------------------------------------------------
@@ -85,12 +85,21 @@ export function initTimeMachine({ map, apiBase, onEnter, onExit, onOpenChange } 
   // --- interpolation ---------------------------------------------------------
   // fixes: ascending [[tMs, lat, lon, bearing, delay], ...]; find the position at
   // virtual time `t` by interpolating between the bracketing fixes.
+  // Project a chainage (shape_dist, km) onto this vehicle's shape → ON-RAIL [lon,lat,brg].
+  // null when the shape isn't loaded yet (graceful fall back to lat/lon lerp).
+  function onRail(v, sd, dl) {
+    if (v.shape == null || sd == null || typeof projectOnShape !== 'function') return null;
+    const p = projectOnShape(v.shape, sd);
+    return p ? feat(v, p[0], p[1], p[2], dl) : null;
+  }
+
   function sampleVehicle(v, t) {
     const f = v.fixes;
     if (!f || !f.length) return null;
-    if (t <= f[0][0]) return feat(v, f[0][2], f[0][1], f[0][3], f[0][4]);
+    // fix tuple: [tMs, lat, lon, bearing, delay, shape_dist]
+    if (t <= f[0][0]) { const a = f[0]; return onRail(v, a[5], a[4]) || feat(v, a[2], a[1], a[3], a[4]); }
     const lastFix = f[f.length - 1];
-    if (t >= lastFix[0]) return feat(v, lastFix[2], lastFix[1], lastFix[3], lastFix[4]);
+    if (t >= lastFix[0]) { const z = lastFix; return onRail(v, z[5], z[4]) || feat(v, z[2], z[1], z[3], z[4]); }
     let lo = 0, hi = f.length - 1;
     while (hi - lo > 1) {
       const mid = (lo + hi) >> 1;
@@ -99,10 +108,17 @@ export function initTimeMachine({ map, apiBase, onEnter, onExit, onOpenChange } 
     const a = f[lo], b = f[hi];
     const span = b[0] - a[0] || 1;
     const k = (t - a[0]) / span;
+    const dl = a[4] == null ? b[4] : a[4];
+    // ON-RAIL: interpolate the chainage between the two fixes and project onto the
+    // shape, so the dot follows the track instead of a straight chord across corners.
+    if (a[5] != null && b[5] != null && b[5] >= a[5]) {
+      const onr = onRail(v, a[5] + (b[5] - a[5]) * k, dl);
+      if (onr) return onr;
+    }
+    // fallback (no shape loaded / no chainage / trip reset): straight lat/lon lerp.
     const lat = a[1] + (b[1] - a[1]) * k;
     const lon = a[2] + (b[2] - a[2]) * k;
     const brg = lerpAngle(a[3], b[3], k);
-    const dl = a[4] == null ? b[4] : a[4];
     return feat(v, lon, lat, brg, dl);
   }
 
@@ -244,6 +260,13 @@ export function initTimeMachine({ map, apiBase, onEnter, onExit, onOpenChange } 
     if (!(to > from)) { from = fMs; to = tMs; }      // degenerate guard
 
     data = { from, to, vehicles };
+
+    // Preload the shapes for these vehicles so the replay can render ON-RAIL (the
+    // engine falls back to lat/lon lerp per-vehicle until its shape lands).
+    if (typeof loadShapes === 'function') {
+      const ids = [...new Set(vehicles.map((v) => v.shape).filter(Boolean))];
+      if (ids.length) { try { loadShapes(ids); } catch { /* non-fatal — lerp fallback */ } }
+    }
 
     if (!ensureLayer()) { setMsg('Map not ready for replay.', true); return; }
     if (!entered) { entered = true; if (typeof onEnter === 'function') { try { onEnter(); } catch { /* ignore */ } } }

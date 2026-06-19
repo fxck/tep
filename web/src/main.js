@@ -967,6 +967,8 @@ map.on('load', () => {
     replayPlayPause: () => { if (timeMachine && timeMachine.togglePlay) timeMachine.togglePlay(); },
     replayScrub: (frac) => { if (timeMachine && timeMachine.scrub) timeMachine.scrub(frac); },
     replaySetSpeed: (x) => { if (timeMachine && timeMachine.setSpeed) timeMachine.setSpeed(x); },
+    // Snap back to the live feed (used by the "Live" pill + visibility resync).
+    goLive: () => resyncLive(),
     // layers
     setLayer: (name, on) => {
       if (name === 'routes') setMapLayer('route-lines', on);
@@ -1091,6 +1093,9 @@ map.on('load', () => {
   try {
     timeMachine = initTimeMachine({
       map, apiBase: API_BASE,
+      // On-rail replay: project a historical chainage onto its shape (same as live).
+      projectOnShape: (sid, d) => { const s = shapes.get(sid); return (s && s !== 'pending' && s.hasDist) ? pointAtDist(s, d) : null; },
+      loadShapes: (ids) => { try { fetchMissingShapes(ids); } catch { /* ignore */ } },
       onEnter: () => {
         replayActive = true;
         setDots(false);
@@ -1487,6 +1492,11 @@ function stepMotion(ts) {
     }
     if (sdReal > cap) sdReal = cap;
     if (total != null && sdReal > total) sdReal = total;
+
+    // One-shot RESNAP — returning from a backgrounded/locked tab. Jump straight to the
+    // dead-reckoned truth (already lead- and stop-capped above) instead of animating
+    // through the backlog missed while hidden. warp=true so renderPos jumps on-rail.
+    if (v.resnap) { v.sd = sdReal; v.vRender = vEff; v.warp = true; v.resnap = false; continue; }
 
     // BOUNDED VELOCITY CORRECTION. err = how far the dead-reckoned truth is from the
     // rendered chainage. It enters ONLY as a velocity term — there is NO err-derived
@@ -1906,6 +1916,33 @@ function connectSSE() {
   });
   es.onopen = () => setConn(true);
   es.onerror = () => setConn(false);
+}
+
+// Re-sync to LIVE. Fetch the freshest full snapshot, then flag every vehicle to
+// RESNAP (stepMotion jumps it to its dead-reckoned truth this frame, no catch-up).
+// Used by the visibility handler (return from a backgrounded/locked tab) and the
+// "Live" pill. Idempotent + cheap.
+async function resyncLive() {
+  for (const v of fleet.values()) { v.resnap = true; v.motT = null; }   // snap immediately to current estimate
+  try {
+    const r = await fetch(`${API_BASE}/api/vehicles`, { cache: 'no-store' });
+    if (r.ok) { applySnapshot(await r.json()); for (const v of fleet.values()) v.resnap = true; }  // re-snap to the newest fixes
+  } catch { /* keep the immediate resnap */ }
+  statsSlice.patch({ stale: false });
+}
+
+// Backgrounded tabs (phone lock, app switch) freeze requestAnimationFrame; on return
+// the loop would otherwise dead-reckon forward from the STALE state — the "it kept
+// playing from where I minimized" report. On regaining visibility after a real
+// absence, snap back to live instead. A brief blur (<3s) needs nothing.
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  let hiddenAt = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { hiddenAt = Date.now(); statsSlice.patch({ stale: true }); return; }
+    const away = Date.now() - (hiddenAt || Date.now());
+    if (away > 3000) resyncLive();
+    else statsSlice.patch({ stale: false });
+  });
 }
 
 // PWA install + offline app-shell (guarded; only registers in production over https).

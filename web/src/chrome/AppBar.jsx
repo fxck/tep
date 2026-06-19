@@ -139,6 +139,7 @@ export default function AppBar() {
   const v = useSlice(view);
   useTicker();
   const m = srcMeta(s.src, s.conn);
+  const isLive = m.live && s.conn && !s.stale;   // false while a backgrounded tab catches up, or SSE dropped
   const is3D = v.render3D;
 
   const [shared, setShared] = React.useState(false);
@@ -172,17 +173,26 @@ export default function AppBar() {
             <TooltipTrigger asChild>
               <button
                 type="button"
-                aria-label="Live feed status"
+                onClick={() => bridge.actions.goLive?.()}
+                aria-label={isLive ? 'Live feed — tap to resync' : 'Paused — tap to go live'}
                 className="hidden items-center gap-1.5 rounded-md px-1.5 py-1 transition-colors hover:bg-surface-2 sm:flex"
               >
-                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', m.live ? 'animate-pulse-dot bg-live' : 'bg-muted-foreground/70')} />
-                <span className="tnum text-label font-semibold leading-none text-foreground">{fmtInt(s.count)}</span>
+                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', isLive ? 'animate-pulse-dot bg-live' : 'bg-warn')} />
+                {isLive
+                  ? <span className="tnum text-label font-semibold leading-none text-foreground">{fmtInt(s.count)}</span>
+                  : <span className="text-label font-semibold leading-none text-warn">GO LIVE</span>}
               </button>
             </TooltipTrigger>
             <TooltipContent>
-              <span className={cn('font-semibold', m.tone)}>{m.word}</span>
-              {m.source ? <span className="text-muted-foreground"> · {m.source}</span> : null}
-              <span className="text-muted-foreground"> · updated {fmtAge(s.ageMs)}</span>
+              {isLive ? (
+                <>
+                  <span className={cn('font-semibold', m.tone)}>{m.word}</span>
+                  {m.source ? <span className="text-muted-foreground"> · {m.source}</span> : null}
+                  <span className="text-muted-foreground"> · updated {fmtAge(s.ageMs)}</span>
+                </>
+              ) : (
+                <span className="font-semibold text-warn">Paused — tap to go live</span>
+              )}
             </TooltipContent>
           </Tooltip>
         </div>

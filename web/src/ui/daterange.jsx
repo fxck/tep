@@ -53,9 +53,11 @@ const PRESETS = [
   { label: '30 min', min: 30 },
   { label: '1 h', min: 60 },
   { label: '3 h', min: 180 },
+  { label: '12 h', min: 720 },
+  { label: '24 h', min: 1440 },
 ];
 
-export default function DateRangePicker({ from, to, onChange, className }) {
+export default function DateRangePicker({ from, to, onChange, className, minMs }) {
   const [open, setOpen] = React.useState(false);
   // Draft state, seeded from props each time the popover opens.
   const [startDay, setStartDay] = React.useState(() => atMidnight(new Date(from)));
@@ -96,6 +98,9 @@ export default function DateRangePicker({ from, to, onChange, className }) {
 
   const weeks = monthGrid(view);
   const today = atMidnight(new Date());
+  // Replay history is bounded (ClickHouse retains ~90 days), so older days are
+  // disabled — there are no banked fixes there, so spanning months/years is pointless.
+  const minDay = atMidnight(new Date(minMs != null ? minMs : Date.now() - 90 * 864e5));
   const inRange = (d) => d && d >= startDay && d <= endDay;
 
   return (
@@ -140,16 +145,18 @@ export default function DateRangePicker({ from, to, onChange, className }) {
             const isStart = sameDay(d, startDay), isEnd = sameDay(d, endDay);
             const within = inRange(d);
             const future = d > today;
+            const tooOld = d < minDay;
+            const off = future || tooOld;
             return (
               <button
                 key={i}
                 type="button"
-                disabled={future}
+                disabled={off}
                 onClick={() => pickDay(d)}
                 className={cn(
                   'tnum aspect-square rounded-md text-caption transition-colors',
-                  future && 'cursor-not-allowed opacity-30',
-                  !within && !future && 'hover:bg-muted/60',
+                  off && 'cursor-not-allowed opacity-30',
+                  !within && !off && 'hover:bg-muted/60',
                   within && !(isStart || isEnd) && 'bg-accent/15 text-foreground',
                   (isStart || isEnd) && 'bg-accent font-bold text-accent-foreground',
                   sameDay(d, today) && !(isStart || isEnd) && 'ring-1 ring-inset ring-accent/50',
