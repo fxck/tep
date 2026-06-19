@@ -757,16 +757,20 @@ async function stopReliability(sp) {
 //
 // Returns ordered per-vehicle fix tracks in a [from,to] window. REQUIRES a
 // `line` OR `mode` to bound result size (else graceful {disabled,reason}). The
-// window is CLAMPED to <= 2h (REPLAY_MAX_MS); from/to are validated unix-ms.
-// CAPS (commented per brief): a per-vehicle ROW_NUMBER cap (REPLAY_FIXES_PER_VEH)
-// keeps any single track bounded, an outer LIMIT (REPLAY_MAX_FIXES) caps total
-// fixes, and we keep <= REPLAY_MAX_VEHICLES vehicles (selected by fix volume).
-// The client interpolates between fixes on its own clock. from/to/line/mode are
-// all parameterized (never interpolated). Fix tuple: [tMs,lat,lon,bearing,delay].
-const REPLAY_MAX_MS = 2 * 3600 * 1000;   // 2h window cap
-const REPLAY_MAX_VEHICLES = 400;          // <= 400 vehicles
-const REPLAY_MAX_FIXES = 6000;            // <= 6000 total fixes
-const REPLAY_FIXES_PER_VEH = 240;         // per-vehicle track cap (240 ~= 8min @2s, or thinned over 2h)
+// window is CLAMPED to <= 24h (REPLAY_MAX_MS); from/to are validated unix-ms.
+// CAPS + THINNING: instead of taking a vehicle's FIRST N fixes (which over a long
+// window only showed its first few minutes), we TIME-BUCKET — one representative fix
+// per vehicle per (window/REPLAY_TARGET_SAMPLES)-second bucket — so coverage is EVEN
+// across the whole window and per-vehicle samples are bounded regardless of range.
+// <= REPLAY_MAX_VEHICLES busiest tracks, <= REPLAY_MAX_FIXES total (hard backstop).
+// The client interpolates between fixes ON ITS SHAPE (shape_dist projection) so the
+// dot follows the rails, not a straight chord. Fix tuple: [tMs,lat,lon,brg,delay,sd].
+// (For "24h, EVERY vehicle incl. all buses" at full payload, the next step is a
+// windowed/streaming loader — these caps keep a single fetch bounded for now.)
+const REPLAY_MAX_MS = 24 * 3600 * 1000;   // 24h window cap (was 2h)
+const REPLAY_MAX_VEHICLES = 6000;          // <= 6000 busiest tracks (was 400)
+const REPLAY_MAX_FIXES = 250000;           // <= 250k total fixes hard backstop (was 6000)
+const REPLAY_TARGET_SAMPLES = 240;         // per-vehicle TEMPORAL samples → time-bucket = window / this
 
 async function replay(sp) {
   const line = (sp.get('line') || '').trim();
@@ -789,9 +793,14 @@ async function replay(sp) {
   from = Math.round(from);
   to = Math.round(to);
 
-  // Pick the most active vehicles first (by fix count) so a capped result still
-  // shows the busy lines. Then pull their fixes, per-vehicle row-capped, and cap
-  // the overall total. ts as epoch-ms via toUnixTimestamp64Milli (DateTime64(3)).
+  // Even temporal THINNING: one representative fix per vehicle per time-bucket, where
+  // the bucket = window / REPLAY_TARGET_SAMPLES (floored at the feed's 2s granularity).
+  // A 2h window -> 30s buckets; a 24h window -> 6min buckets. This bounds per-vehicle
+  // samples AND covers the whole window (vs the old "first N fixes" which only showed
+  // the start). shape_dist + shape_id come along so the client projects ON-RAIL.
+  const winSec = Math.max(1, Math.round((to - from) / 1000));
+  const bucketSec = Math.max(2, Math.ceil(winSec / REPLAY_TARGET_SAMPLES));
+
   const sql = `
     WITH picked AS (
       SELECT vehicle_id
@@ -804,47 +813,57 @@ async function replay(sp) {
       ORDER BY count() DESC
       LIMIT {maxVehicles:UInt16}
     ),
-    ranked AS (
-      SELECT
-        vehicle_id, ts, lat, lon, bearing, delay, line, mode, color,
-        row_number() OVER (PARTITION BY vehicle_id ORDER BY ts ASC) AS rn
-      FROM ${TABLE}
-      WHERE ts >= fromUnixTimestamp64Milli({from:Int64})
-        AND ts <= fromUnixTimestamp64Milli({to:Int64})
-        AND ({line:String} = '' OR line = {line:String})
-        AND ({mode:String} = '' OR mode = {mode:String})
-        AND vehicle_id IN (SELECT vehicle_id FROM picked)
+    thinned AS (
+      SELECT vehicle_id, ts, lat, lon, bearing, delay, shape_dist, shape_id, line, mode, color
+      FROM (
+        SELECT
+          vehicle_id, ts, lat, lon, bearing, delay, shape_dist, shape_id, line, mode, color,
+          row_number() OVER (
+            PARTITION BY vehicle_id, toStartOfInterval(ts, toIntervalSecond({bucketSec:UInt32}))
+            ORDER BY ts ASC
+          ) AS rnb
+        FROM ${TABLE}
+        WHERE ts >= fromUnixTimestamp64Milli({from:Int64})
+          AND ts <= fromUnixTimestamp64Milli({to:Int64})
+          AND ({line:String} = '' OR line = {line:String})
+          AND ({mode:String} = '' OR mode = {mode:String})
+          AND vehicle_id IN (SELECT vehicle_id FROM picked)
+      )
+      WHERE rnb = 1
     )
     SELECT
       vehicle_id,
       argMax(line, ts)                       AS line,
       argMax(mode, ts)                       AS mode,
       argMax(color, ts)                      AS color,
+      argMax(shape_id, ts)                   AS shape_id,
       groupArray(toUnixTimestamp64Milli(ts)) AS tMs,
       groupArray(lat)                        AS lats,
       groupArray(lon)                        AS lons,
       groupArray(bearing)                    AS bearings,
-      groupArray(delay)                      AS delays
+      groupArray(delay)                      AS delays,
+      groupArray(shape_dist)                 AS dists
     FROM (
-      SELECT * FROM ranked WHERE rn <= {perVeh:UInt16} ORDER BY vehicle_id, ts ASC LIMIT {maxFixes:UInt32}
+      SELECT * FROM thinned ORDER BY vehicle_id, ts ASC LIMIT {maxFixes:UInt32}
     )
     GROUP BY vehicle_id`;
 
   const rows = await query(sql, {
-    from, to, line, mode,
+    from, to, line, mode, bucketSec,
     maxVehicles: REPLAY_MAX_VEHICLES,
-    perVeh: REPLAY_FIXES_PER_VEH,
     maxFixes: REPLAY_MAX_FIXES,
   });
 
   // Zip the parallel groupArray columns into compact per-vehicle fix tuples
-  // [tMs, lat, lon, bearing, delay]. Rows already share one vehicle each.
+  // [tMs, lat, lon, bearing, delay, shape_dist]. shape_id is per-vehicle (one trip =
+  // one shape). The client projects shape_dist onto that shape (on-rail), else lerps lat/lon.
   const vehicles = (rows || []).map((r) => {
     const t = r.tMs || [];
     const la = r.lats || [];
     const lo = r.lons || [];
     const br = r.bearings || [];
     const dl = r.delays || [];
+    const di = r.dists || [];
     const fixes = [];
     for (let i = 0; i < t.length; i++) {
       fixes.push([
@@ -853,6 +872,7 @@ async function replay(sp) {
         lo[i] == null ? null : Number(lo[i]),
         br[i] == null ? null : toInt(br[i]),
         dl[i] == null ? null : toInt(dl[i]),
+        di[i] == null ? null : Number(di[i]),
       ]);
     }
     return {
@@ -860,6 +880,7 @@ async function replay(sp) {
       line: r.line,
       mode: r.mode,
       color: colorFor(r.mode, r.color),
+      shape: r.shape_id || null,
       fixes,
     };
   });
