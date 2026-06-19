@@ -43,7 +43,7 @@ export default function StopCard() {
 
   return (
     <div
-      className="surface pointer-events-auto fixed left-3 top-[68px] z-30 w-[300px] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl"
+      className="surface pointer-events-auto fixed left-3 top-[68px] min-[1400px]:top-3 z-30 w-[300px] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl"
       style={{ boxShadow: 'var(--shadow-2)' }}
     >
       <div className="flex items-start gap-2 px-4 pt-3.5">

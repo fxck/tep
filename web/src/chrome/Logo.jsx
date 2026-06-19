@@ -15,13 +15,13 @@ export function LogoMark({ size = 22, live = false, className }) {
       aria-hidden="true"
     >
       <path
-        d="M1.5 17 H8.5 L12 8.5 L16 24 L19.5 14 H23.5"
+        d="M2 16 H10 L12.5 7.5 L15.5 24.5 L17.5 13.5 L20 16 H22"
         stroke="currentColor"
-        strokeWidth="2.4"
+        strokeWidth="2.6"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle cx="27" cy="16" r="3" fill="hsl(var(--live))" className={live ? 'animate-pulse-dot' : undefined} />
+      <circle cx="26.5" cy="16" r="3.2" fill="hsl(var(--live))" className={live ? 'animate-pulse-dot' : undefined} />
     </svg>
   );
 }

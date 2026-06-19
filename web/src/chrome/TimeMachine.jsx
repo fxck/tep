@@ -132,7 +132,7 @@ export default function TimeMachine() {
 
   return (
     <div
-      className="surface pointer-events-auto fixed right-3 top-[68px] z-[31] flex w-[360px] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-2xl"
+      className="surface pointer-events-auto fixed right-3 top-[68px] min-[1400px]:top-3 z-[31] flex w-[360px] max-w-[calc(100vw-1.5rem)] flex-col overflow-hidden rounded-2xl"
       style={{ maxHeight: 'calc(100vh - 84px)', boxShadow: 'var(--shadow-2)' }}
     >
       <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">

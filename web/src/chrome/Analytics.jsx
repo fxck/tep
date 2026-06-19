@@ -926,7 +926,7 @@ export default function Analytics() {
     <aside
       className={cn(
         'pid-ui surface animate-slide-in-right',
-        'fixed right-3 top-[68px] bottom-3 z-30 flex w-[400px] max-w-[94vw] flex-col overflow-hidden rounded-2xl',
+        'fixed right-3 top-[68px] min-[1400px]:top-3 bottom-3 z-30 flex w-[400px] max-w-[94vw] flex-col overflow-hidden rounded-2xl',
         'pointer-events-auto'
       )}
       style={{ boxShadow: 'var(--shadow-2)' }}
