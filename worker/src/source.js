@@ -262,9 +262,10 @@ function normalize(f) {
     tid: tripId, // Golemio trip instance id — banked to ClickHouse (trip_id) to segment per-trip chainage history; not sent to the browser snapshot
     vsd: round(vsd, 7), // chainage speed (km/ms) — client seeds dead-reckoning from this on load
     // Estimator output (present ONLY for flag-enabled modes): esd = filtered chainage
-    // anchor (km), ev = filtered chainage velocity (km/ms). The client uses these as its
-    // dead-reckon target + velocity instead of the raw fix + its own EMA.
-    ...(est ? { esd: est.esd, ev: est.ev } : {}),
+    // anchor (km), ev = filtered chainage velocity (km/ms), eps = position std (km, =√p00).
+    // The client uses esd/ev as its dead-reckon target + velocity, and eps to gate how
+    // fast it converges the render onto that target (confident → faster).
+    ...(est ? { esd: est.esd, ev: est.ev, eps: est.eps } : {}),
   };
 }
 
