@@ -1,0 +1,24 @@
+#zeropsPreprocessor=on
+
+# Local — backing stores only, no app. Run api/worker/web on your machine against
+# these managed services over the Zerops VPN (`zcli vpn up`). Point PG_*, CACHE_*
+# and CH_* at the internal hostnames db / cache / analytics.
+
+project:
+  name: tep-local
+  corePackage: LIGHT
+  tags:
+    - tep
+    - public-transit
+    - local
+
+services:
+  - hostname: db
+    type: postgresql:single@18
+    priority: 10
+  - hostname: cache
+    type: valkey:single@7.2
+    priority: 10
+  - hostname: analytics
+    type: clickhouse:single@25.3
+    priority: 10

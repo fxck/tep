@@ -1,0 +1,54 @@
+#zeropsPreprocessor=on
+
+# Stage — a single non-HA running instance built with the production setups. One
+# container per service, single-node stores. For pre-production validation before
+# Small / HA Production.
+
+project:
+  name: tep-stage
+  corePackage: LIGHT
+  tags:
+    - tep
+    - public-transit
+    - stage
+
+services:
+  - hostname: db
+    type: postgresql:single@18
+    priority: 10
+  - hostname: cache
+    type: valkey:single@7.2
+    priority: 10
+  - hostname: analytics
+    type: clickhouse:single@25.3
+    priority: 10
+
+  - hostname: worker
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: workerprod
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:
+
+  - hostname: api
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: apiprod
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:
+
+  - hostname: web
+    type: nginx@1.22
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: webprodlive
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1

@@ -1,0 +1,81 @@
+#zeropsPreprocessor=on
+
+# AI Agent — full dev + stage pairs for agent-driven development (the topology Tep
+# itself was built on). The dev half starts empty (startWithoutCode) for an AI agent
+# / developer to adopt and drive via zerops_dev_server; the stage half builds from
+# git so there's always a running reference. Single-node stores, non-HA.
+
+project:
+  name: tep-agent
+  corePackage: LIGHT
+  tags:
+    - tep
+    - public-transit
+    - ai-agent
+
+services:
+  # ---- managed stores ----
+  - hostname: db
+    type: postgresql:single@18
+    priority: 10
+  - hostname: cache
+    type: valkey:single@7.2
+    priority: 10
+  - hostname: analytics
+    type: clickhouse:single@25.3
+    priority: 10
+
+  # ---- dev half (empty; the agent adopts + drives these) ----
+  - hostname: apidev
+    type: nodejs@24
+    priority: 5
+    startWithoutCode: true
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:
+  - hostname: workerdev
+    type: nodejs@24
+    priority: 5
+    startWithoutCode: true
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:
+  - hostname: webdev
+    type: nginx@1.22
+    priority: 5
+    startWithoutCode: true
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+
+  # ---- stage half (built from git; running reference) ----
+  - hostname: apistage
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: apiprod
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:
+  - hostname: workerstage
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: workerprod
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:
+  - hostname: webstage
+    type: nginx@1.22
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: webprod         # builds with VITE_API_BASE=${apistage_zeropsSubdomain}
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1

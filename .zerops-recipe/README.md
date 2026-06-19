@@ -6,7 +6,7 @@ See the [root README](../README.md) · live app: **[tep.today](https://tep.today
 
 - **Name:** <!-- #ZEROPS_EXTRACT_START:name# -->Tep<!-- #ZEROPS_EXTRACT_END:name# -->
 - **Shape:** <!-- #ZEROPS_EXTRACT_START:shape# -->app<!-- #ZEROPS_EXTRACT_END:shape# --> — you fork and deploy your own copy
-- **Environments:** `0 — Small Production` (single-node) · `1 — HA Production` (HA clusters)
+- **Environments:** `Local` · `Remote CDE` · `AI Agent` · `Stage` · `Small Production` · `HA Production` — from local-dev backing-stores to a full HA cluster
 
 ## Tagline
 
