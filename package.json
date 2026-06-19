@@ -1,5 +1,5 @@
 {
-  "name": "pid-monorepo",
+  "name": "tep-monorepo",
   "private": true,
   "version": "1.0.0",
   "description": "Tep — Prague public-transport live map. Monorepo: api (Node + Valkey/PostgreSQL/ClickHouse), web (Vite + MapLibre + Three.js), worker (Golemio GTFS-RT poller).",
