@@ -97,6 +97,7 @@ provide is the secret below.
 - `GOLEMIO_API_KEY` (required) — your Golemio API token. Set once at **project level**; auto-injected into both `api` and `worker`.
 - `VITE_API_BASE` (build-time, automatic) — set to `${api_zeropsSubdomain}` for the `web` build.
 - `GOLEMIO_URL`, `GTFS_URL`, `POLL_INTERVAL_MS`, `DEMO_COUNT` (optional) — worker tuning; sensible defaults apply if unset.
+- `PRED_MODES` (optional) — comma-separated modes the worker runs the Kalman motion estimator for (e.g. `tram,trolleybus,bus,train`). Unset/empty falls back to plain dead-reckoning; `metro` is always excluded. The production setups enable it by default.
 
 ### Troubleshooting
 
