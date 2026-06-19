@@ -1644,13 +1644,19 @@ function stepMotion(ts) {
         v.vRender *= park ? frac : Math.max(0.18, frac);
       }
     }
-    // Integrate. Forward-biased; a behind-landing fix never reverses the render.
+    // Integrate. Forward-only (vCmd≥0), so the render never reverses.
+    const sd0 = v.sd;                                   // this frame's starting chainage
     v.sd += v.vRender * dt;
-    // Never overrun truth (forward OR during a backward settle); never exceed the bounds.
-    if (err >= 0 && v.sd > sdReal) v.sd = sdReal;
-    else if (err < 0 && v.sd < sdReal) v.sd = sdReal;
-    if (v.sd > cap) v.sd = cap;
-    if (total != null && v.sd > total) v.sd = total;
+    // Caps (stop / lead / no-overtake / total) are forward CEILINGS only. A cap that
+    // tightened BELOW the current render — a follower now within a vehicle-length of its
+    // leader, a backward Kalman correction shrinking the lead cap — must FREEZE the
+    // vehicle, NEVER reverse it. So clamp up to the ceiling, then never below sd0. This is
+    // the second half of the backward-render fix: vCmd≥0 stops a backward velocity, and
+    // this stops a tightening cap from yanking the position back (the dominant residual).
+    let hi = cap;
+    if (total != null && total < hi) hi = total;        // hi = min(cap, total)
+    if (v.sd > hi) v.sd = hi;
+    if (v.sd < sd0) v.sd = sd0;                          // forward-only: a tight cap freezes, never reverses
     if (v.sd < 0) v.sd = 0;
     // Silent-lag instrument (Phase 0): signed chainage gap render↔target, per mode.
     // Post-clamp so it reflects what's actually drawn vs the capped dead-reckoned truth.
