@@ -118,6 +118,43 @@ export function dbgLag(mode, sdRenderKm, sdRealKm) {
   arr.push((sdRealKm - sdRenderKm) * 1000);   // km → m, signed (target − render)
 }
 
+// PREDICTION ERROR AT FIX ARRIVAL — the deployed model's TRUE one-step DISPLAYED error.
+// At each snapshot retarget for a continuously-predicted vehicle, signed
+// (renderedChainage − rawFixChainage) in metres, bucketed by time-since-last-fix.
+// This is the live cross-check for the offline ClickHouse replay: it captures the FULL
+// client pipeline (estimator seed + bounded corrector + stop-brake + caps), not just the
+// raw estimator. Cumulative across the whole capture (NOT reset per window — fixes are sparse).
+const PE_EDGE = [0, 5, 10, 15, 20, 30, 45, 60, 90, 180];
+const PE_LAB = ['0-5', '5-10', '10-15', '15-20', '20-30', '30-45', '45-60', '60-90', '90-180'];
+const PE_CAP = 60000;
+const predErr = new Map();   // mode -> { all:[], h:Map<label,[]> }
+export function dbgPredErr(mode, dtSec, errM) {
+  if (!ENABLED) return;
+  if (!isFinite(dtSec) || !isFinite(errM)) return;
+  const m = mode || 'other';
+  let e = predErr.get(m);
+  if (!e) { e = { all: [], h: new Map() }; predErr.set(m, e); }
+  if (e.all.length < PE_CAP) e.all.push(errM);
+  let li = PE_LAB.length - 1;
+  for (let i = 0; i < PE_LAB.length; i++) if (dtSec < PE_EDGE[i + 1]) { li = i; break; }
+  let arr = e.h.get(PE_LAB[li]);
+  if (!arr) { arr = []; e.h.set(PE_LAB[li], arr); }
+  if (arr.length < PE_CAP) arr.push(errM);
+}
+function peStats(arr) {
+  if (!arr || !arr.length) return null;
+  const abs = arr.map(Math.abs);
+  return { n: arr.length, mean: Math.round(abs.reduce((s, x) => s + x, 0) / abs.length), p50: pct(abs, 0.5), p90: pct(abs, 0.9), p95: pct(abs, 0.95), bias: Math.round(arr.reduce((s, x) => s + x, 0) / arr.length) };
+}
+function predErrSummary() {
+  const out = {};
+  for (const [m, e] of predErr) {
+    out[m] = { overall: peStats(e.all), horizon: {} };
+    for (const lab of PE_LAB) { const a = e.h.get(lab); if (a && a.length) out[m].horizon[lab] = peStats(a); }
+  }
+  return out;
+}
+
 function bump(map, key) { map.set(key, (map.get(key) || 0) + 1); }
 
 // Tag a vehicle the instant applySnapshot retargets it, so the NEXT frame can
@@ -337,6 +374,8 @@ function emit(ts) {
     // TRACKING ERROR per mode (m) — the silent-lag gate. absMean/absP95 must NOT
     // regress phase-over-phase; bias ≈ 0 means the render sits ON its target.
     lag: lagSummary(),
+    // PREDICTION ERROR vs the next real fix (deployed-model accuracy, cumulative).
+    predErr: predErrSummary(),
     // FRAME metrics (UNRELIABLE in headless — rAF throttled to ~2 fps; read with care):
     frame_teleports: teleports,
     p95_m: pct(dists, 0.95),

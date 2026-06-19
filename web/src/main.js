@@ -4,7 +4,7 @@ import './style.css';
 import './globals.css';
 import { init3DLayer } from './vehicles3d.js';
 import { proceduralMeshProvider } from './meshProvider.js';
-import { dbgEnabled, dbgFrame, dbgTagSnapshot, dbgLag } from './motionDebug.js';
+import { dbgEnabled, dbgFrame, dbgTagSnapshot, dbgLag, dbgPredErr } from './motionDebug.js';
 import { initPins } from './pins.js';
 import { initChaseCam } from './chaseCam.js';
 import { initTimeMachine } from './timeMachine.js';
@@ -1341,6 +1341,7 @@ function applySnapshot(snap) {
     // Real elapsed time since the last fix — basis for the velocity estimate and
     // the "is this move physically possible?" test.
     const dt = nv.ts && ex.fixTs && nv.ts > ex.fixTs ? nv.ts - ex.fixTs : FALLBACK_DUR;
+    const sdShownKm = ex.sd;   // displayed chainage BEFORE this fix retargets it (prediction-error probe)
 
     let dbgBranch = 'glide', dbgImpliedKmh = 0, dbgFwdKm = 0;
 
@@ -1446,6 +1447,13 @@ function applySnapshot(snap) {
       ex.eLon = ex.eLat = 0;
     }
 
+    // Prediction-error probe: how far our DISPLAYED chainage was from the raw fix that
+    // just landed (the ground truth), for a continuously-predicted vehicle on the same
+    // shape. Skip new-trip / shape-change / point-mode (not a continuous prediction).
+    if (dbgEnabled() && sdShownKm != null && nv.sd != null && !shapeChanged && dbgBranch !== 'newtrip'
+        && dbgBranch !== 'point' && dbgBranch !== 'point-snap' && dt > 0 && dt <= 180000) {
+      dbgPredErr(ex.props && ex.props.mode, dt / 1000, (sdShownKm - nv.sd) * 1000);
+    }
     if (dbgEnabled()) dbgTagSnapshot(ex, {
       branch: dbgBranch, smoothed, gapM,
       // signed predicted speed (m/s): vSd is clamped ≥0 so a 'glide' never reads
