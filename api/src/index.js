@@ -151,6 +151,20 @@ async function getShapes(ids) {
   return out;
 }
 
+// GTFS feed epoch — the worker stamps gtfs_meta.last_ingest (ISO) on every static
+// ingest. Surfaced via /api/meta so the browser's IndexedDB shape cache can bust
+// itself when PID republishes. Cached 60s (it changes ~weekly).
+let gtfsVer = null, gtfsVerAt = 0;
+async function getGtfsVersion() {
+  if (gtfsVer && Date.now() - gtfsVerAt < 60_000) return gtfsVer;
+  try {
+    const r = await pgPool.query("SELECT v FROM gtfs_meta WHERE k = 'last_ingest'");
+    if (r.rows[0] && r.rows[0].v) gtfsVer = r.rows[0].v;
+  } catch { /* table missing / db blip — keep last known */ }
+  gtfsVerAt = Date.now();
+  return gtfsVer;
+}
+
 async function getStops() {
   if (stopsCache && Date.now() - stopsAt < 3600_000) return stopsCache;
   // Only BOARDABLE stops. PID GTFS stop_id encodes the node type: `…Z<n>` = a
@@ -214,7 +228,7 @@ const server = http.createServer(async (req, res) => {
         shapesCached: shapeCache.size,
       });
     }
-    if (path === '/api/meta') return sendJson(res, 200, META, 60);
+    if (path === '/api/meta') return sendJson(res, 200, { ...META, gtfsVersion: await getGtfsVersion() }, 60);
     if (path === '/api/vehicles') return sendJson(res, 200, latest);
     if (path === '/api/stops') return sendJson(res, 200, { stops: await getStops() }, 3600);
     // Live PID departure board for a station (StopCard). Server-side proxy to Golemio
