@@ -184,6 +184,10 @@ zerops:
         CH_USER: ${analytics_user}
         CH_PASSWORD: ${analytics_password}
         CH_DB: ${analytics_dbName}
+        # Live-prediction estimator (architecture §3): the worker runs a per-vehicle 1-D Kalman
+        # chainage filter for these modes and emits {esd,ev,eps} the client uses for smooth,
+        # low-lag motion. Empty/unset ⇒ byte-identical v1.0.12. metro is excluded in code.
+        PRED_MODES: tram,trolleybus,bus,train
       start: node src/index.js
       healthCheck:
         httpGet:
