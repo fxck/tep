@@ -1645,11 +1645,14 @@ function stepMotion(ts) {
       // and left to the EMA + brake. etaPos ≤ nsSd, so the raised cap still never passes the stop.
       if (ns.at && v.fixTs && ns.at > nowWall && ns.at > v.fixTs) {
         const leadToStop = ns.at - v.fixTs;
-        if (leadToStop >= ETA_MIN_MS && leadToStop <= ETA_MAX_MS) {
-          const frac = Math.max(0, Math.min(1, (nowWall - v.fixTs) / leadToStop));
-          const etaPos = v.sdTarget + (nsSd - v.sdTarget) * frac;
-          sdReal = Math.max(sdReal, etaPos);
-          cap = Math.max(cap, Math.min(nsSd, etaPos));      // let the schedule pace through the lead cap
+        const frac = Math.max(0, Math.min(1, (nowWall - v.fixTs) / leadToStop));
+        const etaPos = v.sdTarget + (nsSd - v.sdTarget) * frac;
+        sdReal = Math.max(sdReal, etaPos);                  // pace toward the stop (all modes, unchanged)
+        // Raise the lead cap to the schedule pace ONLY for the lagging estimator modes in the
+        // reliable window. Metro (est=false, already at its floor via the median path) keeps the
+        // throttled pacing — the cap-raise would otherwise push its accurate dot slightly ahead.
+        if (v.est && leadToStop >= ETA_MIN_MS && leadToStop <= ETA_MAX_MS) {
+          cap = Math.max(cap, Math.min(nsSd, etaPos));
           etaAnchored = true;
         }
       }
