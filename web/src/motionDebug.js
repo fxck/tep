@@ -85,6 +85,15 @@ let backwardRender = 0, maxBackM = 0, overtakes = 0;
 const lastSdById = new Map();    // id -> last-frame chainage (km), for the backward-render test
 const ovPrevSd = new Map();      // id -> last-frame chainage (km), for the order-inversion test
 
+// CROSS-LINE OVERLAP — peak count, in any single frame this window, of same-direction rail
+// pairs whose RENDERED bodies overlap (within OVERLAP_M, headings within 40°). This is the
+// shape-AGNOSTIC test for "two trams stacked on one track" (e.g. lines 3 & 9): it catches
+// the cross-line overtaking the per-shape `overtakes` counter is blind to. Legit queueing at
+// a stop sits a vehicle-length apart (>OVERLAP_M), so this counts only the visible-stack bug.
+let tooClose = 0;
+const OVERLAP_M = 14;            // bodies closer than this (same direction) = overlapping/stacked
+const MPD_LAT = 111320, MPD_LON = 71600;  // metres/deg at Prague ~50.08°N
+
 // --- TRACKING-ERROR / SILENT-LAG metric (Phase 0 of the prediction roadmap) ----
 // The teleport/backward/fast counters above are BLIND to a smoothly-lagging
 // estimator: a corrector whose convergence is too slow (or a Kalman with too-low
@@ -144,11 +153,19 @@ export function dbgFrame(fleet, ts, refOf, shapeReadyOf) {
   const fdt = lastFrameTs != null ? (ts - lastFrameTs) : 0; // real frame dt (ms) for the rate metric
   lastFrameTs = ts;
 
+  const railPts = [];               // rendered rail positions this frame, for the cross-line overlap test
+
   for (const v of fleet.values()) {
     const id = (v.props && v.props.id) != null ? v.props.id : v;
     const warped = !!v.warp;          // read BEFORE refOf — renderPos consumes the warp flag
     const s = refOf(v);
     if (!s || !isFinite(s.lon) || !isFinite(s.lat)) { v._dbgPending = false; continue; }
+
+    const rmode = v.props && v.props.mode;
+    if (v.sd != null && s.hdg != null && (rmode === 'tram' || rmode === 'metro' || rmode === 'train')) {
+      const h = s.hdg * Math.PI / 180;
+      railPts.push({ x: s.lon * MPD_LON, y: s.lat * MPD_LAT, hx: Math.sin(h), hy: Math.cos(h) });
+    }
 
     // BACKWARD-RENDER (the real reverse test): a routed vehicle whose rendered
     // chainage stepped backward this frame, excluding intended warps (new trip /
@@ -231,6 +248,35 @@ export function dbgFrame(fleet, ts, refOf, shapeReadyOf) {
     ovPrevSd.set(id, v.sd);
   }
 
+  // CROSS-LINE OVERLAP this frame (shape-agnostic): same-direction rail bodies within OVERLAP_M.
+  if (railPts.length > 1) {
+    const grid = new Map();
+    for (const p of railPts) {
+      const key = Math.floor(p.x / OVERLAP_M) + ',' + Math.floor(p.y / OVERLAP_M);
+      let b = grid.get(key); if (!b) { b = []; grid.set(key, b); }
+      b.push(p);
+    }
+    const O2 = OVERLAP_M * OVERLAP_M;
+    let cnt = 0;
+    for (const p of railPts) {
+      const cx = Math.floor(p.x / OVERLAP_M), cy = Math.floor(p.y / OVERLAP_M);
+      for (let gx = cx - 1; gx <= cx + 1; gx++) {
+        for (let gy = cy - 1; gy <= cy + 1; gy++) {
+          const b = grid.get(gx + ',' + gy); if (!b) continue;
+          for (const q of b) {
+            if (q === p) continue;
+            const dx = q.x - p.x, dy = q.y - p.y;
+            if (dx * dx + dy * dy > O2) continue;
+            if (p.hx * q.hx + p.hy * q.hy < 0.766) continue;   // same direction (within 40°)
+            cnt++;
+          }
+        }
+      }
+    }
+    cnt = Math.floor(cnt / 2);          // each overlapping pair counted from both ends
+    if (cnt > tooClose) tooClose = cnt; // window peak
+  }
+
   if (ts - windowStart >= SUMMARY_MS) emit(ts);
 }
 
@@ -274,6 +320,7 @@ function emit(ts) {
       backwardRender,             // MUST be 0 — chainage stepped BACKWARD on screen (real reverse, warps excluded)
       maxBackM: Math.round(maxBackM),  // worst single-frame backward step (m)
       overtakes,                  // MUST be 0 — same-track chainage-order inversions (a visible pass)
+      tooClose,                   // peak same-direction rail bodies overlapping (cross-line stack) — target ~0
       backwardGlides,             // (legacy, structurally 0 — kept for continuity)
       fastGlides,                 // glides >180 km/h (forward streak)
       instantSnaps,               // gap>SNAP_HARD instant jumps (true teleports left)
@@ -321,7 +368,7 @@ function emit(ts) {
   lagByMode.clear();
   renderSpeeds = []; maxRenderMps = 0; overspeed = 0;
   teleports = 0; frames = 0; retargets = 0;
-  backwardRender = 0; maxBackM = 0; overtakes = 0;
+  backwardRender = 0; maxBackM = 0; overtakes = 0; tooClose = 0;
   backwardGlides = 0; fastGlides = 0; instantSnaps = 0; backwardHeld = 0; snapBacks = 0;
   maxGlideMps = 0; maxSlideMps = 0;
   windowStart = ts;

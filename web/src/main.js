@@ -166,6 +166,15 @@ const vmaxKmMs = (mode) => (VMAX_KMH[mode] || 90) / 3.6e6; // km per millisecond
 const NO_OVERTAKE_MODES = new Set(['tram', 'metro', 'train']);
 const FOLLOW_GAP_KM_BY_MODE = { tram: 0.022, metro: 0.075, train: 0.055 };
 const followGapKm = (mode) => FOLLOW_GAP_KM_BY_MODE[mode] || 0.030;
+// SPATIAL no-overtake (cross-line, same physical track). Different lines share track but
+// carry DIFFERENT shape_ids, so the shape-group cap can't pair them (e.g. tram 3 vs 9 on
+// Lidická). Detect a leader by GEOMETRY: a same-direction vehicle just ahead and nearly
+// collinear. Metres; Prague is ~50.08°N so 1° lon ≈ 111320·cos(50.08°).
+const M_PER_DEG_LAT = 111320;
+const M_PER_DEG_LON = 71600;
+const NO_OVERTAKE_LOOK_M = 60;     // only cap on a leader within this forward distance
+const NO_OVERTAKE_LATERAL_M = 8;   // max lateral offset to count as the SAME track (excludes parallel streets + opposing-track offset)
+const NO_OVERTAKE_COS = 0.766;     // cos(40°): headings must align within 40° → same direction only (oncoming trams ~180° are excluded)
 
 // --- bidirectional track separation (item A) --------------------------------
 // Opposing directions share one coincident centerline in the GTFS shapes. We
@@ -1522,6 +1531,56 @@ function stepMotion(ts) {
     for (let i = 0; i < g.length - 1; i++) g[i]._leaderSd = g[i + 1].sd;
   }
 
+  // SPATIAL no-overtake — catches the cross-LINE case the shape groups miss (tram 3 & 9 on
+  // one track, different shape_ids). Bucket every rail vehicle's current on-rail point into a
+  // coarse grid, then find the nearest OTHER rail vehicle that is ahead along this heading,
+  // nearly collinear (small lateral offset) and travelling the SAME way. Cap the follower a
+  // vehicle-length behind it (in its OWN chainage). Forward distance ≈ chainage advance, so
+  // the spatial gap maps straight to a chainage ceiling. Opposing trams (heading ~180°) and
+  // parallel streets (large lateral) are excluded, so a two-track line keeps both directions.
+  const spGrid = new Map();
+  const spList = [];
+  for (const v of fleet.values()) {
+    v._spatialCapSd = null;
+    if (v.sd == null || !v.shp) continue;
+    if (!NO_OVERTAKE_MODES.has(v.props && v.props.mode)) continue;
+    const rp = railPos(v);
+    if (!rp) continue;
+    const x = rp.lon * M_PER_DEG_LON, y = rp.lat * M_PER_DEG_LAT;
+    const h = (rp.hdg != null ? rp.hdg : 0) * Math.PI / 180;
+    const e = { v, x, y, hx: Math.sin(h), hy: Math.cos(h) };
+    spList.push(e);
+    const key = Math.floor(x / NO_OVERTAKE_LOOK_M) + ',' + Math.floor(y / NO_OVERTAKE_LOOK_M);
+    let b = spGrid.get(key);
+    if (!b) { b = []; spGrid.set(key, b); }
+    b.push(e);
+  }
+  const LAT2 = NO_OVERTAKE_LATERAL_M * NO_OVERTAKE_LATERAL_M;
+  for (const e of spList) {
+    const { x, y, hx, hy } = e;
+    const cx = Math.floor(x / NO_OVERTAKE_LOOK_M), cy = Math.floor(y / NO_OVERTAKE_LOOK_M);
+    let bestF = Infinity;
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const b = spGrid.get(gx + ',' + gy);
+        if (!b) continue;
+        for (const o of b) {
+          if (o === e) continue;
+          const dx = o.x - x, dy = o.y - y;
+          const f = dx * hx + dy * hy;                  // forward distance to candidate (m)
+          if (f <= 0 || f >= NO_OVERTAKE_LOOK_M) continue;       // must be ahead, within look range
+          if ((dx * dx + dy * dy) - f * f > LAT2) continue;      // lateral offset too big → different track
+          if (hx * o.hx + hy * o.hy < NO_OVERTAKE_COS) continue; // not same direction
+          if (f < bestF) bestF = f;
+        }
+      }
+    }
+    if (bestF < Infinity) {
+      const gapM = followGapKm(e.v.props && e.v.props.mode) * 1000;
+      e.v._spatialCapSd = e.v.sd + Math.max(0, bestF - gapM) / 1000;   // km ceiling on this vehicle's own chainage
+    }
+  }
+
   for (const v of fleet.values()) {
     if (v.sd == null || v.sdTarget == null) continue;   // point-mode vehicles don't predict
     let dt = v.motT != null ? ts - v.motT : DRAW_INTERVAL;
@@ -1576,6 +1635,8 @@ function stepMotion(ts) {
       const followCap = Math.max(v.sdTarget, v._leaderSd - followGapKm(v.props && v.props.mode));
       if (cap > followCap) cap = followCap;
     }
+    // Cross-line spatial leader (same physical track, different shape) — same forward-ceiling treatment.
+    if (v._spatialCapSd != null && cap > v._spatialCapSd) cap = v._spatialCapSd;
     if (sdReal > cap) sdReal = cap;
     if (total != null && sdReal > total) sdReal = total;
 
