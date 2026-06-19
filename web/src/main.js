@@ -95,6 +95,10 @@ const SNAP_HARD_M = 1500;     // ≈ CATCHUP_MPS·SMOOTH_MAX_MS: only a GPS-glit
 // time), so it ≈ the actual CURRENT position and the render tracks it smoothly
 // instead of lagging a whole fix behind.
 const V_EMA = 0.45;            // speed-estimate smoothing (EMA weight of each new fix)
+const VEMA_GOV = 0.15;         // SLOW EMA weight for the anti-dart cap governor (vEma) when the
+                               // worker estimator is active — deliberately slower than the Kalman v
+                               // so a velocity spike can't lift the speed ceiling that bounds it
+                               // (architecture must-fix #2). Unused when the estimator is off.
 // Per-mode forward-prediction LEAD: how far past the last fix the dead-reckon may run.
 // MUST cover the FULL worst-case age of a fix before its successor lands — i.e. the fix
 // INTERVAL *plus* the staleness with which fixes arrive — else, on a long gap, the target
@@ -1263,6 +1267,12 @@ function applySnapshot(snap) {
     if (nv.shp) { shapeIds.push(nv.shp); if (nv.color) shapeColor.set(nv.shp, nv.color); }
     const ex = fleet.get(nv.id);
     if (!ex) {
+      // Worker-authoritative estimator active for this vehicle iff it carries esd.
+      // Seed the truth anchor + velocity from the filter (esd/ev) instead of the raw
+      // fix + worker EMA seed (vsd). estNew false → byte-identical v1.0.12 seeding.
+      const estNew = typeof nv.esd === 'number';
+      const seedSd = estNew ? nv.esd : nv.sd;
+      const seedV = estNew ? Math.max(0, nv.ev) : (typeof nv.vsd === 'number' ? nv.vsd : 0);
       fleet.set(nv.id, {
         fromLon: nv.lon, fromLat: nv.lat, toLon: nv.lon, toLat: nv.lat,
         shp: nv.shp || null, spd: nv.spd, brg: nv.brg,
@@ -1273,8 +1283,12 @@ function applySnapshot(snap) {
         // SEED vSd from the worker's chainage-speed estimate so a freshly-loaded
         // vehicle dead-reckons IMMEDIATELY instead of freezing until its own 2nd fix
         // (~20-40s). Falls back to 0 when the field is absent (old feed).
-        sd: nv.sd, sdTarget: nv.sd, vSd: (typeof nv.vsd === 'number' ? nv.vsd : 0),
-        vRender: (typeof nv.vsd === 'number' ? nv.vsd : 0),  // rendered chainage velocity; seed = cold-start glide
+        sd: seedSd, sdTarget: seedSd, vSd: seedV,
+        vRender: seedV,  // rendered chainage velocity; seed = cold-start glide
+        // Estimator lanes (must-fix #1/#2): est gates the forward ratchet + the slow-EMA
+        // cap governor; vEma is the spike-proof anti-dart denominator; sdRealPrev is the
+        // ratchet floor. All inert when est=false (byte-identical v1.0.12).
+        est: estNew, vEma: estNew ? seedV : null, sdRealPrev: null,
         kmh: nv.spd != null && nv.spd !== '' ? Math.round(Number(nv.spd)) : null, moving: null,
         fixTs: nv.ts || Date.now(), fixMono: now, motT: now, dwell: nv.st === 'at_stop',
         eLon: 0, eLat: 0, eT0: null, eDur: SMOOTH_MS, railed: false,
@@ -1306,16 +1320,26 @@ function applySnapshot(snap) {
     const shapeChanged = ex.shp !== (nv.shp || null);
     ex.shp = nv.shp || null;
     ex.dwell = nv.st === 'at_stop';                      // dwell gate parks the prediction at stops
+    // Worker-authoritative estimator active iff this fix carries esd. When on, the truth
+    // ANCHOR is the filtered chainage (esd) and the velocity is the filtered ev — the
+    // client no longer recomputes its own EMA. When off, `anchor`==nv.sd and every branch
+    // below is byte-identical to v1.0.12.
+    const est = typeof nv.esd === 'number' && nv.sd != null;
+    const anchor = est ? nv.esd : nv.sd;
+    ex.est = est;
     if (nv.sd == null) {
       // No chainage in the feed → pure point-mode (GPS lerp), no prediction.
-      ex.sd = ex.sdTarget = null; ex.vSd = 0;
+      ex.sd = ex.sdTarget = null; ex.vSd = 0; ex.est = false;
       dbgBranch = farPt ? 'point-snap' : 'point';
     } else if (shapeChanged || ex.sd == null || ex.sdTarget == null) {
-      // New trip / first shaped fix → appear AT the fix on the rail, zero speed.
-      ex.sd = ex.sdTarget = nv.sd; ex.vSd = 0; ex.vRender = 0; ex.warp = true;
+      // New trip / first shaped fix → appear AT the anchor on the rail. Seed velocity from
+      // the estimator (≈0 on a fresh trip) or 0. Reset the ratchet + governor lanes.
+      const sv = est ? Math.max(0, nv.ev) : 0;
+      ex.sd = ex.sdTarget = anchor; ex.vSd = sv; ex.vRender = sv; ex.warp = true;
+      ex.vEma = est ? sv : null; ex.sdRealPrev = null;
       dbgBranch = 'newtrip';
     } else {
-      const dSd = nv.sd - ex.sdTarget;                   // signed advance since the last fix (km)
+      const dSd = anchor - ex.sdTarget;                  // signed advance since the last fix (km)
       dbgFwdKm = dSd;
       const impliedKmh = (Math.abs(dSd) / Math.max(dt, 1)) * 3600000;
       dbgImpliedKmh = Math.round(impliedKmh);
@@ -1323,29 +1347,30 @@ function applySnapshot(snap) {
       const backRev = dSd < -SD_BACK_KM;                 // real reversal / trip turnaround
       const tooFast = impliedKmh > SNAP_KMH;             // physically impossible → data jump
       if (bigDisc || backRev || tooFast) {
-        // One clean correction: snap render + truth to the fix on the rail, reset
-        // speed, and WARP so renderPos jumps there this frame (no off-rail chord).
-        ex.sd = ex.sdTarget = nv.sd; ex.vSd = 0; ex.vRender = 0; ex.warp = true;
+        // One clean correction: snap render + truth to the anchor on the rail, reset
+        // speed + ratchet, and WARP so renderPos jumps there this frame (no off-rail chord).
+        const sv = est ? Math.max(0, nv.ev) : 0;
+        ex.sd = ex.sdTarget = anchor; ex.vSd = sv; ex.vRender = sv; ex.warp = true;
+        ex.vEma = est ? sv : null; ex.sdRealPrev = null;
         dbgBranch = bigDisc ? 'snap-disc' : backRev ? 'snap-back' : 'snap-fast';
       } else {
-        // NORMAL: update the forward velocity estimate (EMA, clamped ≥0 and ≤vmax)
-        // and advance the truth anchor. Leave ex.sd (the RENDERED chainage) ALONE —
-        // stepMotion reconciles it FORWARD-ONLY toward the new dead-reckoned target,
-        // so a fix landing behind the prediction never reverses the render (the old
-        // "backward teleport"). Backward GPS noise → vActual 0 ⇒ a brief hold/coast.
-        const vActual = Math.max(0, dSd) / Math.max(dt, 1); // km/ms, never negative
-        const vClamped = Math.min(vActual, vmaxKmMs(ex.props.mode));
-        // Metro: the feed is dense (~5 s) and synthetic-feeling, so a fresh per-fix
-        // self-estimate passes a ~24 km/h speed swing that the corrector renders as
-        // jitter. The worker carries a cross-tick median+EMA of the SAME chainage speed
-        // (source.js VSD_MEDIAN_MODES), so for metro we render that smoothed value
-        // directly instead of the noisy self-estimate. Other modes self-estimate as before.
-        if (ex.props.mode === 'metro' && typeof nv.vsd === 'number') {
+        // NORMAL: advance the truth anchor + velocity. Leave ex.sd (the RENDERED chainage)
+        // ALONE — stepMotion reconciles it FORWARD-ONLY toward the new dead-reckoned target,
+        // so a fix landing behind the prediction never reverses the render.
+        if (est) {
+          // Adopt the worker-filtered velocity directly (no client EMA), and maintain the
+          // SLOW governor EMA used only as the anti-dart cap denominator (must-fix #2).
+          ex.vSd = Math.min(Math.max(0, nv.ev), vmaxKmMs(ex.props.mode));
+          ex.vEma = (ex.vEma == null) ? ex.vSd : ex.vEma + (ex.vSd - ex.vEma) * VEMA_GOV;
+        } else if (ex.props.mode === 'metro' && typeof nv.vsd === 'number') {
+          // Metro: dense ~5 s feed → render the worker's smoothed vsd directly (byte-identical).
           ex.vSd = Math.min(Math.max(0, nv.vsd), vmaxKmMs(ex.props.mode));
         } else {
+          const vActual = Math.max(0, dSd) / Math.max(dt, 1); // km/ms, never negative
+          const vClamped = Math.min(vActual, vmaxKmMs(ex.props.mode));
           ex.vSd = lerp(ex.vSd != null ? ex.vSd : vClamped, vClamped, V_EMA);
         }
-        ex.sdTarget = nv.sd;
+        ex.sdTarget = anchor;
         dbgBranch = dSd < -1e-9 ? 'hold-back' : (dSd < SD_MOVE_KM ? 'hold' : 'glide');
       }
     }
@@ -1475,6 +1500,11 @@ function stepMotion(ts) {
     // against an open-loop run-through. Age uses the real fix timestamp, so feed
     // latency is compensated and v.sd tracks the actual current position.
     const vEff = (v.dwell && !stopAhead) ? 0 : Math.max(0, v.vSd || 0);
+    // Anti-dart GOVERNOR (must-fix #2): the speed-cap denominator rides a SLOW EMA (vEma),
+    // never the fresh estimator velocity — a velocity spike must never lift the ceiling that
+    // bounds it. With the estimator off, v.vEma is null → vGov falls back to vEff → the cap
+    // is byte-identical v1.0.12. vGov feeds ONLY vCruise below; vEff still drives the target.
+    const vGov = (v.dwell && !stopAhead) ? 0 : Math.max(0, (v.vEma != null ? v.vEma : v.vSd) || 0);
     const lead = leadMs(v.props && v.props.mode);            // per-mode lead ≈ this mode's fix interval
     const ageMs = Math.min(lead, Math.max(0, nowWall - (v.fixTs || nowWall)));
     let sdReal = v.sdTarget + vEff * ageMs;                  // dead-reckoned target (extrapolated to now)
@@ -1493,6 +1523,16 @@ function stepMotion(ts) {
     if (sdReal > cap) sdReal = cap;
     if (total != null && sdReal > total) sdReal = total;
 
+    // FORWARD-MONOTONIC RATCHET (must-fix #1, estimator only). A filtered/blended target can
+    // RECEDE on a backward correction (innovation < 0). Pin sdReal so it never steps back within
+    // the caps — otherwise the err<0 overrun guard below would drag the render backward this frame
+    // (a visible reverse). A legitimately tightening cap (stop approach / total) still wins, so a
+    // real decel into a stop is preserved. Off (est=false) → byte-identical (no pin, no sdRealPrev).
+    if (v.est) {
+      if (v.sdRealPrev != null) sdReal = Math.max(sdReal, Math.min(v.sdRealPrev, cap));
+      v.sdRealPrev = sdReal;
+    }
+
     // One-shot RESNAP — returning from a backgrounded/locked tab. Jump straight to the
     // dead-reckoned truth (already lead- and stop-capped above) instead of animating
     // through the backlog missed while hidden. warp=true so renderPos jumps on-rail.
@@ -1505,8 +1545,10 @@ function stepMotion(ts) {
     const err = sdReal - v.sd;
     const vmax = vmaxKmMs(v.props && v.props.mode);
     const tau = convTau(v.props && v.props.mode);
-    // Cruise the corrector relaxes toward (a floor lets a just-departed/cold vehicle pull away):
-    const vCruise = (err > 0) ? Math.max(vEff, vmax * CRUISE_FLOOR) : vEff;
+    // Cruise the corrector relaxes toward (a floor lets a just-departed/cold vehicle pull away).
+    // Uses the GOVERNOR lane (vGov), not vEff, so the anti-dart ceiling never tracks a fresh
+    // estimator velocity spike (must-fix #2). vGov==vEff when the estimator is off.
+    const vCruise = (err > 0) ? Math.max(vGov, vmax * CRUISE_FLOOR) : vGov;
     // The correction is a VELOCITY (km/ms), bled in over ~one convergence interval for this mode:
     let vCmd = vCruise + err / tau;
     // HARD anti-dart clamp BEFORE integration: ≤ SPEED_CAP_MULT×cruise forward (a believable mode
