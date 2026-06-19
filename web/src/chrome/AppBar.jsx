@@ -10,6 +10,7 @@ import { useTicker } from '../lib/useTicker.js';
 import { LogoMark } from './Logo.jsx';
 import LineFilter from './LineFilter.jsx';
 import ThemeToggle from './ThemeToggle.jsx';
+import { CreditLinks } from './Credit.jsx';
 import { Switch } from '../ui/switch.jsx';
 import { Slider } from '../ui/slider.jsx';
 import { Popover, PopoverTrigger, PopoverContent } from '../ui/popover.jsx';
@@ -341,6 +342,7 @@ export default function AppBar() {
               <button type="button" onClick={() => panels.set((st) => ({ ...st, help: true }))} className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-body hover:bg-muted/60">
                 <HelpCircle className="h-4 w-4" /> Keyboard shortcuts
               </button>
+              <CreditLinks />
             </PopoverContent>
           </Popover>
         </div>

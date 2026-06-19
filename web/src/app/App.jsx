@@ -7,7 +7,6 @@ import TimeMachine from '../chrome/TimeMachine.jsx';
 import CommandPalette from '../chrome/CommandPalette.jsx';
 import HelpOverlay from '../chrome/HelpOverlay.jsx';
 import Narration from '../chrome/Narration.jsx';
-import Credit from '../chrome/Credit.jsx';
 import { useShortcuts } from '../chrome/useShortcuts.js';
 import { startThemeEngine } from '../lib/theme.js';
 
@@ -35,7 +34,6 @@ export default function App() {
       <TimeMachine />
       <CommandPalette />
       <HelpOverlay />
-      <Credit />
     </div>
   );
 }
