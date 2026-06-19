@@ -8,6 +8,11 @@
 project:
   name: tep-cde
   corePackage: LIGHT
+  # GOLEMIO_API_KEY — the app container runs api + worker, both of which call
+  # Golemio. Project-level so it's set once and injected everywhere. Get a free key
+  # at https://api.golemio.cz/ and fill it in.
+  envVariables:
+    GOLEMIO_API_KEY:
   tags:
     - tep
     - public-transit
@@ -32,5 +37,3 @@ services:
     enableSubdomainAccess: true
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:           # required → deploy wizard prompts

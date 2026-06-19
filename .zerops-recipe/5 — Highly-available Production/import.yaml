@@ -6,6 +6,10 @@
 project:
   name: tep
   corePackage: SERIOUS
+  # GOLEMIO_API_KEY — shared by api + worker, so it lives at project level (set
+  # once, injected into every service). Free key: https://api.golemio.cz/
+  envVariables:
+    GOLEMIO_API_KEY:
   tags:
     - tep
     - public-transit
@@ -33,8 +37,6 @@ services:
     maxContainers: 2
     verticalAutoscaling:
       cpuMode: DEDICATED
-    envSecrets:
-      GOLEMIO_API_KEY:          # required → deploy wizard prompts
 
   # ---- read API (REST + SSE); its subdomain is what the web build targets ----
   - hostname: api
@@ -47,8 +49,6 @@ services:
     maxContainers: 4
     verticalAutoscaling:
       cpuMode: DEDICATED
-    envSecrets:
-      GOLEMIO_API_KEY:          # required → deploy wizard prompts
 
   # ---- WebGL frontend (built with VITE_API_BASE=${api_zeropsSubdomain}) ----
   - hostname: web

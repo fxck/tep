@@ -6,7 +6,7 @@ See the [root README](../README.md) · live app: **[tep.today](https://tep.today
 
 - **Name:** <!-- #ZEROPS_EXTRACT_START:name# -->Tep<!-- #ZEROPS_EXTRACT_END:name# -->
 - **Shape:** <!-- #ZEROPS_EXTRACT_START:shape# -->app<!-- #ZEROPS_EXTRACT_END:shape# --> — you fork and deploy your own copy
-- **Environments:** `Local` · `Remote CDE` · `AI Agent` · `Stage` · `Small Production` · `HA Production` — from local-dev backing-stores to a full HA cluster
+- **Environments:** `AI Agent` · `Remote (CDE)` · `Local` · `Stage` · `Small Production` · `HA Production` — the dev-lifecycle ladder, from an agent-driven dev/stage pair up to a full HA cluster
 
 ## Tagline
 
@@ -30,8 +30,10 @@ The architecture is built for throughput and to leave room for a later 3D phase:
 the frontend is WebGL-capable from day one, and the API/worker split means you can
 scale the read path independently of the ingest path.
 
-Two environments are available — a lean single-node setup to evaluate, and a fully
-highly-available topology that matches the live tep.today deployment.
+Several topologies ship as one recipe, covering the whole dev lifecycle: an
+agent-driven dev/stage pair, a single remote CDE container, a backing-stores-only
+setup for local development, a single-node stage, and production on shared (Small)
+or dedicated HA hardware — the last matching the live tep.today deployment.
 <!-- #ZEROPS_EXTRACT_END:description# -->
 
 ## Features
@@ -52,8 +54,8 @@ highly-available topology that matches the live tep.today deployment.
 <!-- #ZEROPS_EXTRACT_START:takeover-guide# -->
 **Set your Golemio API key.** Tep reads Prague's open data through the Golemio API,
 which requires a free key. Register at https://api.golemio.cz/, create a key, and
-paste it when the deploy wizard prompts for `GOLEMIO_API_KEY` (the same value is
-used by both the `api` and `worker` services). Without it the worker logs
+set it as the **project-level** `GOLEMIO_API_KEY` variable — one value, auto-injected
+into both the `api` and `worker` services. Without it the worker logs
 `Golemio HTTP 401` and the map stays empty.
 
 **Populate the static timetable (stops & route shapes).** Live vehicles work
@@ -92,13 +94,13 @@ Cross-service wiring (`PG_*`, `CH_*`, `CACHE_*`) is resolved automatically from 
 managed services via `zerops.yaml` — you never set these by hand. The only value you
 provide is the secret below.
 
-- `GOLEMIO_API_KEY` (required, prompted) — your Golemio API token, used by `api` and `worker`.
+- `GOLEMIO_API_KEY` (required) — your Golemio API token. Set once at **project level**; auto-injected into both `api` and `worker`.
 - `VITE_API_BASE` (build-time, automatic) — set to `${api_zeropsSubdomain}` for the `web` build.
 - `GOLEMIO_URL`, `GTFS_URL`, `POLL_INTERVAL_MS`, `DEMO_COUNT` (optional) — worker tuning; sensible defaults apply if unset.
 
 ### Troubleshooting
 
-- **Empty map / `Golemio HTTP 401` in worker logs** — `GOLEMIO_API_KEY` is missing or wrong. Set it on `api` and `worker`, then restart those services.
+- **Empty map / `Golemio HTTP 401` in worker logs** — `GOLEMIO_API_KEY` is missing or wrong. Set the **project-level** variable, then restart `api` and `worker` (env changes apply on restart, not hot-reload).
 - **No stop markers / route lines; `/api/stops` returns 503** — the static GTFS hasn't been ingested. Run `node src/ingest-gtfs.js` on the `worker` service, or wait for the nightly cron.
 - **Map loads but no vehicles** — confirm the `web` build baked the `api` subdomain into `VITE_API_BASE` (the `api` service must have subdomain access enabled), and that `/api/vehicles` on the `api` subdomain returns data.
 <!-- #ZEROPS_EXTRACT_END:knowledge-base# -->

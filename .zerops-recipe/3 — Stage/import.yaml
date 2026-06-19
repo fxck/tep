@@ -7,6 +7,10 @@
 project:
   name: tep-stage
   corePackage: LIGHT
+  # GOLEMIO_API_KEY — shared by api + worker, so it lives at project level (set
+  # once, injected into every service). Free key: https://api.golemio.cz/
+  envVariables:
+    GOLEMIO_API_KEY:
   tags:
     - tep
     - public-transit
@@ -30,8 +34,6 @@ services:
     zeropsSetup: workerprod
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:
 
   - hostname: api
     type: nodejs@24
@@ -41,8 +43,6 @@ services:
     enableSubdomainAccess: true
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:
 
   - hostname: web
     type: nginx@1.22

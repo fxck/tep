@@ -8,6 +8,11 @@
 project:
   name: tep-agent
   corePackage: LIGHT
+  # GOLEMIO_API_KEY is a SHARED secret — api and worker both call Golemio — so it
+  # lives at project level (set once, injected into every service) rather than as a
+  # per-service secret. Get a free key at https://api.golemio.cz/ and fill it in.
+  envVariables:
+    GOLEMIO_API_KEY:
   tags:
     - tep
     - public-transit
@@ -33,16 +38,12 @@ services:
     enableSubdomainAccess: true
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:
   - hostname: workerdev
     type: nodejs@24
     priority: 5
     startWithoutCode: true
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:
   - hostname: webdev
     type: nginx@1.22
     priority: 5
@@ -60,8 +61,6 @@ services:
     enableSubdomainAccess: true
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:
   - hostname: workerstage
     type: nodejs@24
     priority: 5
@@ -69,8 +68,6 @@ services:
     zeropsSetup: workerprod
     minContainers: 1
     maxContainers: 1
-    envSecrets:
-      GOLEMIO_API_KEY:
   - hostname: webstage
     type: nginx@1.22
     priority: 5
