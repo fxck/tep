@@ -56,6 +56,18 @@ const MAX_DT_MS = 180000;  // gap longer than this ⇒ fresh segment (stale-feed
 
 const round = (n, d) => { const f = 10 ** d; return Math.round(n * f) / f; };
 
+// Reported-speed measurement noise (km/ms)². The feed's `speed` field (buses, ~76%;
+// ferry) is an integer km/h instantaneous reading — quantization + sensor jitter ≈ ±8 km/h.
+// Fusing it as a SECOND measurement (on the velocity state) injects a FRESH velocity the
+// chainage-delta filter would otherwise have to ramp into, cutting the cold-start + lag bias.
+const R_V = (8 / 3.6e6) ** 2;
+
+// Modes where carrying pre-reset velocity through a forward snap is SAFE + helpful: the
+// sparse, low-speed rail modes (tram/trolley), whose cold-start lag is large and whose
+// speeds are too low to fatten tails. Buses instead fuse their reported speed (better);
+// train is excluded — fast + fat-tailed, any carry over-predicts and inflated its RMSE.
+const CARRY_MODES = new Set(['tram', 'trolleybus']);
+
 const PRED_MODES = (() => {
   const raw = (process.env.PRED_MODES || '').trim();
   const set = new Set(raw ? raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : []);
@@ -72,61 +84,95 @@ function initP(kf, vmax) {
   return { p00: kf.R, p01: 0, p11: vmax * vmax };     // (km², km²/ms, (km/ms)²)
 }
 
-// updateEstimator(id, mode, sd, ts, shp): one Kalman step for a genuinely-new fix.
-// Returns { esd, ev, eps } (km, km/ms, km) when the mode is estimated, else null.
-// Between fixes (ts unchanged) it HOLDS and re-emits the current estimate so every
-// snapshot the client might refresh against carries a consistent triple.
-export function updateEstimator(id, mode, sd, ts, shp) {
+// esd = filtered chainage (km); ev = filtered velocity (km/ms); eps = position std (√p00, km);
+// evs = velocity std (√p11, km/ms) — lets the client compute HORIZON-AWARE uncertainty
+// √(eps² + (evs·age)²) instead of gating on sensor noise alone (architecture: eps recalibration).
+function emit(st) {
+  return {
+    esd: round(st.sd, 6), ev: round(st.v, 8),
+    eps: round(Math.sqrt(Math.max(0, st.p00)), 5),
+    evs: round(Math.sqrt(Math.max(0, st.p11)), 9),
+  };
+}
+
+// updateEstimator(id, mode, sd, ts, shp, spdKmh): one Kalman step for a genuinely-new fix.
+// Returns { esd, ev, eps, evs } when the mode is estimated, else null. Between fixes (ts
+// unchanged) it HOLDS and re-emits. spdKmh = the feed's reported instantaneous speed (km/h,
+// buses/ferry; null for rail) — used to SEED velocity on reset and FUSE it as a measurement.
+export function updateEstimator(id, mode, sd, ts, shp, spdKmh) {
   if (!PRED_MODES.has(mode) || sd == null || !ts) return null;
   const vmax = vmaxKmMs(mode);
   const kf = KF[mode] || DEFAULT_KF;
+  // Reported speed as a velocity observation (km/ms), when present + sane.
+  const zv = (spdKmh != null && isFinite(spdKmh) && spdKmh >= 0) ? Math.min(spdKmh / 3.6e6, vmax) : null;
   let st = state.get(id);
 
-  // Reset: first sight, shape/trip change, or a too-long gap.
+  // VELOCITY SEED on reset: prefer a direct speed observation; else carry the pre-reset
+  // velocity when the vehicle was clearly mid-motion (gap revival / forward data-jump); else 0.
+  // Killing the unconditional v=0 reset removes the cold-start lag that a memoryless filter
+  // otherwise pays at the start of every segment.
+  const canCarry = CARRY_MODES.has(mode);
+  const seedV = (carry) => (zv != null ? zv : (carry && canCarry && st ? Math.min(Math.max(0, st.v), vmax) : 0));
+
+  // Reset: first sight, shape/trip change, or a too-long gap (stale-feed revival). Do NOT
+  // carry velocity across a long TIME gap — a >180 s-old speed is too stale and blew up
+  // fast-mode (train) tails. A fresh speed obs (zv) still seeds; else start at 0.
   if (!st || st.shp !== shp || !st.ts || (ts - st.ts) > MAX_DT_MS) {
     const P = initP(kf, vmax);
-    st = { sd, v: 0, ts, shp, ...P };
+    st = { sd, v: seedV(false), ts, shp, ...P };
     state.set(id, st);
-    return { esd: round(sd, 6), ev: 0, eps: round(Math.sqrt(P.p00), 5) };
+    return emit(st);
   }
-  if (ts <= st.ts) {                                  // not newer → hold
-    return { esd: round(st.sd, 6), ev: round(st.v, 8), eps: round(Math.sqrt(st.p00), 5) };
-  }
+  if (ts <= st.ts) return emit(st);                   // not newer → hold
 
   const dt = ts - st.ts;                              // ms
   // --- PREDICT (constant-velocity; process noise = white-acceleration PSD q) ---
   const sdPred = st.sd + st.v * dt;
   const innov = sd - sdPred;                          // innovation (km)
 
-  // Discontinuity → reset (mirror the client snap branches).
+  // Discontinuity → reset (mirror the client snap branches). A FORWARD jump means the vehicle
+  // was moving fast (keep momentum / seed from speed); a BACKWARD jump is a reversal (v=0 unless
+  // a fresh speed obs says otherwise).
   if (Math.abs(innov) > SD_SNAP_KM || innov < -SD_BACK_KM) {
+    // A FORWARD position-jump (innov>0) within the cadence window means the vehicle was
+    // moving fast — keep that momentum (helps the sparse modes) rather than cold-starting at 0.
+    // A BACKWARD jump is a reversal → v=0 (unless a fresh speed obs seeds it).
     const P = initP(kf, vmax);
-    st.sd = sd; st.v = 0; st.ts = ts; st.shp = shp; st.p00 = P.p00; st.p01 = P.p01; st.p11 = P.p11;
-    return { esd: round(sd, 6), ev: 0, eps: round(Math.sqrt(P.p00), 5) };
+    st.sd = sd; st.v = seedV(innov > 0); st.ts = ts; st.shp = shp; st.p00 = P.p00; st.p01 = P.p01; st.p11 = P.p11;
+    return emit(st);
   }
 
   const dt2 = dt * dt, dt3 = dt2 * dt;
   // P⁻ = F·P·Fᵀ + Q,  F = [[1,dt],[0,1]],  Q = q·[[dt³/3, dt²/2],[dt²/2, dt]]
-  const p00 = st.p00 + 2 * dt * st.p01 + dt2 * st.p11 + kf.q * dt3 / 3;
-  const p01 = st.p01 + dt * st.p11 + kf.q * dt2 / 2;
-  const p11 = st.p11 + kf.q * dt;
+  let p00 = st.p00 + 2 * dt * st.p01 + dt2 * st.p11 + kf.q * dt3 / 3;
+  let p01 = st.p01 + dt * st.p11 + kf.q * dt2 / 2;
+  let p11 = st.p11 + kf.q * dt;
 
-  // --- UPDATE (scalar measurement z = sd, H = [1,0]) ---
-  const S = p00 + kf.R;                               // innovation variance
-  const k0 = p00 / S;                                 // Kalman gains
-  const k1 = p01 / S;
+  // --- UPDATE 1: position (scalar z = sd, H = [1,0]) ---
+  const S = p00 + kf.R;
+  const k0 = p00 / S, k1 = p01 / S;
   let sdNew = sdPred + k0 * innov;
   let vNew = st.v + k1 * innov;
+  let n00 = (1 - k0) * p00, n01 = (1 - k0) * p01, n11 = p11 - k1 * p01;
+
+  // --- UPDATE 2: velocity fusion (scalar z = reported speed, H = [0,1]) — buses/ferry ---
+  // Injects the FRESH instantaneous speed so the rendered velocity doesn't trail an
+  // accelerating vehicle as far. Skipped (no-op) for rail, which has no speed field.
+  if (zv != null) {
+    const Sv = n11 + R_V;
+    const kv0 = n01 / Sv, kv1 = n11 / Sv;
+    const dvv = zv - vNew;
+    sdNew += kv0 * dvv;
+    vNew += kv1 * dvv;
+    const m00 = n00 - kv0 * n01, m01 = n01 - kv0 * n11, m11 = n11 - kv1 * n11;
+    n00 = m00; n01 = m01; n11 = m11;
+  }
   if (vNew < 0) vNew = 0;                              // chainage velocity forward-only (rectification)
   if (vNew > vmax) vNew = vmax;
-  // Joseph-free covariance update (standard form; gains from this same P).
-  const n00 = (1 - k0) * p00;
-  const n01 = (1 - k0) * p01;
-  const n11 = p11 - k1 * p01;
 
   st.sd = sdNew; st.v = vNew; st.ts = ts; st.shp = shp;
-  st.p00 = n00; st.p01 = n01; st.p11 = Math.max(0, n11);
-  return { esd: round(sdNew, 6), ev: round(vNew, 8), eps: round(Math.sqrt(Math.max(0, n00)), 5) };
+  st.p00 = Math.max(0, n00); st.p01 = n01; st.p11 = Math.max(0, n11);
+  return emit(st);
 }
 
 // Bound memory: drop filter state for vehicles no longer in the live set.

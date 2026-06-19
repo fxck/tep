@@ -198,7 +198,7 @@ function normalize(f) {
   // Worker-authoritative chainage estimator (flag-gated per mode via PRED_MODES).
   // Returns {esd, ev} only for estimated modes; null otherwise → the record carries
   // NO esd field → the client takes its byte-identical v1.0.12 path.
-  const est = (sd != null && ts) ? updateEstimator(String(id), meta.mode, sd, ts, shp) : null;
+  const est = (sd != null && ts) ? updateEstimator(String(id), meta.mode, sd, ts, shp, speed) : null;
 
   // Rich per-vehicle fields (defensive — many are null for some vehicles).
   const cis = trip.cis || {};
@@ -265,7 +265,7 @@ function normalize(f) {
     // anchor (km), ev = filtered chainage velocity (km/ms), eps = position std (km, =√p00).
     // The client uses esd/ev as its dead-reckon target + velocity, and eps to gate how
     // fast it converges the render onto that target (confident → faster).
-    ...(est ? { esd: est.esd, ev: est.ev, eps: est.eps } : {}),
+    ...(est ? { esd: est.esd, ev: est.ev, eps: est.eps, evs: est.evs } : {}),
   };
 }
 
