@@ -4,7 +4,7 @@ import './style.css';
 import './globals.css';
 import { init3DLayer } from './vehicles3d.js';
 import { proceduralMeshProvider } from './meshProvider.js';
-import { dbgEnabled, dbgFrame, dbgTagSnapshot } from './motionDebug.js';
+import { dbgEnabled, dbgFrame, dbgTagSnapshot, dbgLag } from './motionDebug.js';
 import { initPins } from './pins.js';
 import { initChaseCam } from './chaseCam.js';
 import { initTimeMachine } from './timeMachine.js';
@@ -1538,6 +1538,9 @@ function stepMotion(ts) {
     if (v.sd > cap) v.sd = cap;
     if (total != null && v.sd > total) v.sd = total;
     if (v.sd < 0) v.sd = 0;
+    // Silent-lag instrument (Phase 0): signed chainage gap render↔target, per mode.
+    // Post-clamp so it reflects what's actually drawn vs the capped dead-reckoned truth.
+    if (dbgEnabled()) dbgLag(v.props && v.props.mode, v.sd, sdReal);
   }
 }
 

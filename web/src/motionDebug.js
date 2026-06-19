@@ -73,6 +73,30 @@ let glideSpeeds = [];
 // realistic top speed; a flood of `overspeed` (>108 km/h) means a catch-up dash.
 let renderSpeeds = [], maxRenderMps = 0, overspeed = 0, lastFrameTs = null;
 
+// --- TRACKING-ERROR / SILENT-LAG metric (Phase 0 of the prediction roadmap) ----
+// The teleport/backward/fast counters above are BLIND to a smoothly-lagging
+// estimator: a corrector whose convergence is too slow (or a Kalman with too-low
+// Q) renders persistently BEHIND its own dead-reckoned target without ever
+// teleporting or reversing — invisible to every metric here. This is the gate
+// metric the roadmap requires before/under each estimator phase: it samples, per
+// frame per vehicle, the signed chainage gap (sdReal − sdRender) in METRES.
+//   • |lag| quantiles  → how far the render trails the target (the silent lag).
+//   • signed mean (bias) → which way it trails (≈0 is healthy; persistently
+//     positive = render chronically behind truth; negative = overrunning).
+// Bucketed per mode because cadence (and therefore expected lag) differs sharply
+// (tram p50 ~50 s fix gap vs metro ~5 s). A phase that REGRESSES lag for any mode
+// fails the acceptance bar even if backwardGlides stays 0.
+const lagByMode = new Map();      // mode -> array of signed lag (m) this window
+
+export function dbgLag(mode, sdRenderKm, sdRealKm) {
+  if (!ENABLED) return;
+  if (sdRenderKm == null || sdRealKm == null || !isFinite(sdRenderKm) || !isFinite(sdRealKm)) return;
+  const m = mode || 'other';
+  let arr = lagByMode.get(m);
+  if (!arr) { arr = []; lagByMode.set(m, arr); }
+  arr.push((sdRealKm - sdRenderKm) * 1000);   // km → m, signed (target − render)
+}
+
 function bump(map, key) { map.set(key, (map.get(key) || 0) + 1); }
 
 // Tag a vehicle the instant applySnapshot retargets it, so the NEXT frame can
@@ -159,6 +183,26 @@ function pct(arr, p) {
   return Math.round(a[Math.min(a.length - 1, Math.floor(p * a.length))]);
 }
 
+// Per-mode tracking-error summary (metres): |lag| central tendency/tail + signed
+// bias. n = samples (frames×vehicles), so it's also a coverage indicator.
+function lagSummary() {
+  const out = {};
+  for (const [mode, arr] of lagByMode) {
+    if (!arr.length) continue;
+    const abs = arr.map(Math.abs);
+    const mean = arr.reduce((s, x) => s + x, 0) / arr.length;          // signed bias
+    const absMean = abs.reduce((s, x) => s + x, 0) / abs.length;
+    out[mode] = {
+      n: arr.length,
+      absMean: Math.round(absMean),     // mean |sdReal − sdRender| (m) — the silent-lag magnitude
+      absP95: pct(abs, 0.95),           // tail lag (m)
+      absMax: Math.round(Math.max(...abs)),
+      bias: Math.round(mean),           // signed mean (m): +behind / −overrun, ≈0 healthy
+    };
+  }
+  return out;
+}
+
 function emit(ts) {
   const secs = (ts - windowStart) / 1000;
   const reasonObj = Object.fromEntries([...reasons.entries()].sort((a, b) => b[1] - a[1]));
@@ -183,6 +227,9 @@ function emit(ts) {
       renderP95Mps: pct(renderSpeeds, 0.95),    // typical fast dot ≈ cruise speed
       overspeed,                                // # frame-samples > 108 km/h (a catch-up dash)
     },
+    // TRACKING ERROR per mode (m) — the silent-lag gate. absMean/absP95 must NOT
+    // regress phase-over-phase; bias ≈ 0 means the render sits ON its target.
+    lag: lagSummary(),
     // FRAME metrics (UNRELIABLE in headless — rAF throttled to ~2 fps; read with care):
     frame_teleports: teleports,
     p95_m: pct(dists, 0.95),
@@ -211,6 +258,7 @@ function emit(ts) {
   dists = [];
   examples = [];
   glideSpeeds = [];
+  lagByMode.clear();
   renderSpeeds = []; maxRenderMps = 0; overspeed = 0;
   teleports = 0; frames = 0; retargets = 0;
   backwardGlides = 0; fastGlides = 0; instantSnaps = 0; backwardHeld = 0; snapBacks = 0;

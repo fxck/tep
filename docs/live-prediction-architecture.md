@@ -138,6 +138,35 @@ built; Phases 1–3 use one-off seeds, Phase 4 depends on it.*
 
 ---
 
+## 4a. Empirical R/Q seed (measured 2026-06-19, 3-day window, 12.9 M fixes)
+
+The Phase-0 seed query (lag-2 autocovariance of the position 2nd-difference, segmented by
+`(vehicle_id, shape_id)`, sane/uniform/forward triples only) — the high-frequency-residual split:
+
+| mode | n | T̄ (s) | v p50/p90 (km/h) | σ_R (m) | dv_std (m/s) | q (m²/s³) | λ=σ_v·T/σ_R | Kalata α / β |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| tram | 592 k | 49.4 | 19.4 / 41.7 | 154 | 6.9 | 0.0010 | 2.21 | 0.87 / 0.81 |
+| trolleybus | 42 k | 42.5 | 18.2 / 49.0 | 194 | 9.5 | 0.0021 | 2.08 | 0.86 / 0.79 |
+| bus | 7.4 M | 21.8 | 33.4 / 67.7 | 80 | 8.3 | 0.0032 | 2.26 | 0.87 / 0.81 |
+| train | 939 k | 17.9 | 48.5 / 106 | 55 | 15.5 | 0.0134 | 5.05 | 0.95 / 0.95 |
+| metro | 1.66 M | 6.4 | 0 / 109 | 45 | 20.0 | 0.0622 | — (median path) |
+
+**Findings that shape the filter:**
+1. **σ_R is motion-contaminated at sparse cadence** — 154 m for trams is *not* GPS noise (~10 m); it's
+   the irreducible motion the constant-velocity model can't predict across a 50 s gap. The estimate
+   tightens as cadence densifies (metro 45 m @ 6.4 s). Confirms R/Q are convolved at this cadence.
+2. **Process-noise-dominated regime (λ ≈ 2–5)** → steady-state **α ≈ 0.87, β ≈ 0.81**: trust each fix's
+   position strongly, track velocity actively. Because σ_R is inflated, *true* λ is larger, so these are
+   conservative lower bounds on α. Validates the shipped anchor-on-fix + EMA-velocity design; the
+   estimator's real value-add is a principled **velocity + covariance**, NOT position re-smoothing
+   (which would double-smooth against the client corrector → added lag).
+3. **Velocity increments are large and real** (tram ~6.9 m/s ≈ 25 km/h per fix) → keep velocity
+   smoothing light; α-β with high α + active β tracks genuine accel/decel without lag.
+
+Seed gains are clamped (α∈[0.6,0.95], β∈[0.3,0.95]) and refined online by the Phase-0 lag metric.
+Variable cadence (8–159 s) means fixed α-β is optimal only at nominal T̄ → Phase 2's KF adapts the
+gain to actual `dt` + accumulated covariance.
+
 ## 5. Grounding facts & risks (the part that keeps this honest)
 
 - **History is only ~3 days old, not 90** (TTL configured, data not yet accrued). Corridor payoff is
@@ -146,8 +175,11 @@ built; Phases 1–3 use one-off seeds, Phase 4 depends on it.*
 - **R/Q identifiability:** sensor noise R and process noise Q **cannot** be read off the raw
   132 m/345 m jump distribution (it's motion+noise convolved). Split via the high-frequency residual
   against a smoothed per-(vehicle, trip) sd-vs-ts curve (extends the existing `lagInFrame(shape_dist)`
-  query, `api/clickhouse.js:644`). Compute from full-precision Δsd/Δts, **not** round-tripped Float32
-  CH `shape_dist` (storage quantization would inflate R).
+  query, `api/clickhouse.js:644`). **Done — see §4a.** The lag-2 autocovariance split was run; it
+  confirmed the convolution (σ_R inflates from 45 m @ metro cadence to 154–194 m @ tram/trolley
+  cadence) and produced the per-mode α/β seeds. Float32 CH `shape_dist` quantization is ~1–4 mm at
+  these chainages (≪ GPS), so it does not measurably inflate R for the seed; the live filter still
+  computes from full-precision Δsd in the worker.
 - **Silent-lag blind spot:** the existing teleport/backward/fast counters can't detect an estimator
   that smoothly lags real motion. The new lag metric (Phase 0) gates every subsequent phase.
 - **Corridor confidently wrong** on diversions/incidents → live off-profile down-weight + sample floor +
