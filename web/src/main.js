@@ -143,6 +143,15 @@ const convTau = (mode) => CONV_TAU_MS_BY_MODE[mode] || 15000;
 const TAU_MIN_MS = 8000;
 const EPS_REF_KM_BY_MODE = { tram: 0.154, trolleybus: 0.194, bus: 0.080, train: 0.055, metro: 0.045, other: 0.10 };
 const epsRefKm = (mode) => EPS_REF_KM_BY_MODE[mode] || 0.10;
+// ETA forward-anchor window (ms): the schedule arrival (ns.at) is a VALIDATED forward signal
+// only at moderate lead — measured next_stop_eta MAE ~30 s for 30–600 s lead, but noise inside
+// 30 s (dwell/arriving) and beyond ~600 s. Inside this window we pace toward the stop AND raise
+// the lead cap to the schedule pace, so a too-slow estimator velocity stops capping us short.
+const ETA_MIN_MS = 30000, ETA_MAX_MS = 600000;
+// Capped, moving-only forward lead (residual-bias correction). The estimator renders behind truth;
+// where no reliable ETA anchor applies, nudge the target a BOUNDED amount forward. Small + clamped
+// to the lead cap so it can never overshoot a stop or dart.
+const LEAD_FWD_K = 0.35, LEAD_FWD_CAP_KM = 0.03;
 const SD_MOVE_KM = 0.012;      // a fix advancing < this (≈12 m) is treated as stationary → hold
 const APPROACH_KM = 0.05;      // within this distance of the NEXT STOP, ease the velocity down so a
                                // vehicle DECELERATES into the stop (gated to real stops, NOT the lead cap).
@@ -1324,6 +1333,7 @@ function applySnapshot(snap) {
         // ratchet floor. All inert when est=false (byte-identical v1.0.12).
         est: estNew, vEma: estNew ? seedV : null, sdRealPrev: null,
         posStd: estNew ? nv.eps : null,   // filter position std (km) — gates tau_eff in stepMotion
+        posVStd: estNew ? nv.evs : null,  // filter velocity std (km/ms) — horizon-aware tau_eff gating
         kmh: nv.spd != null && nv.spd !== '' ? Math.round(Number(nv.spd)) : null, moving: null,
         fixTs: nv.ts || Date.now(), fixMono: now, motT: now, dwell: nv.st === 'at_stop',
         eLon: 0, eLat: 0, eT0: null, eDur: SMOOTH_MS, railed: false,
@@ -1364,6 +1374,7 @@ function applySnapshot(snap) {
     const anchor = est ? nv.esd : nv.sd;
     ex.est = est;
     ex.posStd = est ? nv.eps : null;                     // filter position std (km) for tau_eff gating
+    ex.posVStd = est ? nv.evs : null;                    // filter velocity std (km/ms) for horizon-aware gating
     if (nv.sd == null) {
       // No chainage in the feed → pure point-mode (GPS lerp), no prediction.
       ex.sd = ex.sdTarget = null; ex.vSd = 0; ex.est = false;
@@ -1625,15 +1636,28 @@ function stepMotion(ts) {
     let sdReal = v.sdTarget + vEff * ageMs;                  // dead-reckoned target (extrapolated to now)
     let cap = v.sdTarget + Math.min(MAX_LEAD_KM, vEff * lead); // stale-feed lead guard
 
+    let etaAnchored = false;
     if (stopAhead) {
       cap = Math.min(cap, nsSd);                            // never overshoot the next stop
-      // If the schedule arrival is genuinely still in the future, ALSO pace toward
-      // the stop by the timetable (a smooth decel into it); otherwise the EMA glide
-      // plus the cap carry it there. Guarded so a stale (past) clock never applies.
+      // ETA FORWARD-ANCHOR. Pace toward the scheduled arrival AND raise the lead cap to that
+      // pace, so a too-slow estimator velocity (the measured lag bias) no longer throttles the
+      // schedule. Gated to the VALIDATED reliable lead window; <30 s (dwell) / >600 s are noisy
+      // and left to the EMA + brake. etaPos ≤ nsSd, so the raised cap still never passes the stop.
       if (ns.at && v.fixTs && ns.at > nowWall && ns.at > v.fixTs) {
-        const frac = Math.max(0, Math.min(1, (nowWall - v.fixTs) / (ns.at - v.fixTs)));
-        sdReal = Math.max(sdReal, v.sdTarget + (nsSd - v.sdTarget) * frac);
+        const leadToStop = ns.at - v.fixTs;
+        if (leadToStop >= ETA_MIN_MS && leadToStop <= ETA_MAX_MS) {
+          const frac = Math.max(0, Math.min(1, (nowWall - v.fixTs) / leadToStop));
+          const etaPos = v.sdTarget + (nsSd - v.sdTarget) * frac;
+          sdReal = Math.max(sdReal, etaPos);
+          cap = Math.max(cap, Math.min(nsSd, etaPos));      // let the schedule pace through the lead cap
+          etaAnchored = true;
+        }
       }
+    }
+    // CAPPED FORWARD LEAD (residual-bias correction) — only where the ETA anchor doesn't already
+    // pull us forward: moving, not dwelling, not braking into a stop. Bounded then clamped to cap.
+    if (v.est && !etaAnchored && vEff > 0 && !v.dwell && !(stopAhead && nsSd - v.sdTarget < APPROACH_KM)) {
+      sdReal += Math.min(LEAD_FWD_CAP_KM, LEAD_FWD_K * vEff * ageMs);
     }
     // NO-OVERTAKE cap: never advance within a vehicle-length of the one ahead on this
     // SAME shape (one physical track). Floored at sdTarget so a follower that's already
@@ -1676,7 +1700,11 @@ function stepMotion(ts) {
     let tau = convTau(mode);
     if (v.est && v.posStd != null) {
       const tauMin = Math.min(TAU_MIN_MS, tau);
-      const gA = Math.min(1, v.posStd / (2 * epsRefKm(mode)));   // covariance uncertainty
+      // HORIZON-AWARE uncertainty: position std grows with the velocity std projected over the
+      // fix age — √(eps² + (evs·age)²). Gating on this (not eps alone, which tracks only sensor
+      // noise) makes the render converge GENTLY when a stale/uncertain fix is extrapolated far.
+      const unc = v.posVStd != null ? Math.sqrt(v.posStd * v.posStd + (v.posVStd * ageMs) ** 2) : v.posStd;
+      const gA = Math.min(1, unc / (2 * epsRefKm(mode)));        // covariance uncertainty (horizon-aware)
       const gB = Math.min(1, ageMs / lead);                      // staleness
       tau = tauMin + (tau - tauMin) * Math.max(gA, gB);
     }
