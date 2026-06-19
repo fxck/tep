@@ -80,48 +80,57 @@ const SNAP_HARD_M = 1500;     // ≈ CATCHUP_MPS·SMOOTH_MAX_MS: only a GPS-glit
 // --- forward-prediction (dead-reckoning) motion -----------------------------
 // The vehicle no longer FREEZES between the sparse (~40s) fixes: it dead-reckons
 // FORWARD along the shape at an estimated chainage speed (vSd, an EMA of recent
-// Δsd/Δt), then reconciles when the next fix lands. Reconciliation is
-// ERROR-PROPORTIONAL (see CATCHUP_TAU_MS / BACK_TAU_MS below): behind truth → speed
-// up by an amount that scales with the gap (small lag = gentle, big lag = fast eased
-// slide); ahead of truth → ease back at a low-capped rate so a rail vehicle corrects
-// by adjusting speed, never a backward jump. Two guards stop runaway prediction:
+// Δsd/Δt), then reconciles when the next fix lands. Reconciliation is BOUNDED
+// VELOCITY CORRECTION (see SPEED_CAP_MULT / CONV_TAU below): the fix error enters
+// ONLY as a velocity term (err/CONV_TAU added to cruise) that is HARD-CLAMPED to a
+// believable multiple of the vehicle's own cruise BEFORE it is integrated — so the
+// rendered position can never sprint to "catch up" no matter how big the error is
+// (the violent darting that an err-driven position chase produced). Two guards stop
+// runaway prediction:
 //   • DWELL gate — state_position 'at_stop' ⇒ speed 0, so it PARKS at a stop
 //     instead of sailing through it (the overshoot that used to snap back).
-//   • LEAD cap — predict at most MAX_LEAD_MS / MAX_LEAD_KM past the last confirmed
-//     fix; a stale feed then holds rather than crossing the city.
+//   • LEAD cap — predict at most a per-mode lead (≈ the mode's fix interval) /
+//     MAX_LEAD_KM past the last fix; a stale feed then holds rather than crossing the city.
 // Latency-compensated: the dead-reckoned target uses the real fix AGE (now − fix
 // time), so it ≈ the actual CURRENT position and the render tracks it smoothly
 // instead of lagging a whole fix behind.
 const V_EMA = 0.45;            // speed-estimate smoothing (EMA weight of each new fix)
-const MAX_LEAD_MS = 30000;     // predict at most this long past the last confirmed fix
-const MAX_LEAD_KM = 0.9;       // ...and at most this far (whichever bound is hit first)
-const CHASE_FLOOR = 0.28;      // The render chases the dead-reckoned target at the vehicle's OWN
-                               // predicted speed vEff — so a dot NEVER moves faster than the vehicle
-                               // really is. This fraction-of-vmax FLOOR is the only exception: it lets
-                               // a stopped vehicle gently pull away once a fix shows it departed.
-                               // Capping the chase at cruise (not 1.2×vmax, and certainly not the old
-                               // flat 55 m/s ≈198 km/h) is the real fix for "moves stupidly fast":
-                               // vehicles were chronically pegged at the catch-up cap, not cruising.
-// --- ERROR-PROPORTIONAL reconciliation (replaces the old flat-rate chase) ---
-// stepMotion reconciles the rendered chainage v.sd toward the dead-reckoned truth
-// sdReal with ONE proportional law, so "catch up a little" and "catch up a lot"
-// fall out of the same formula instead of a hard threshold:
-//   BEHIND (sdReal > v.sd): chase forward at max(vEff, floor, err/CATCHUP_TAU). The
-//     err/TAU term makes a small lag a gentle speed-up and a large lag a fast eased
-//     slide that closes in ~CATCHUP_TAU (a "smooth teleport" — decelerating as it
-//     arrives, never an instant jump). Capped at MAX_CATCHUP_MULT×vmax.
-//   AHEAD  (sdReal < v.sd): we over-predicted. Ease the render BACK at gap/BACK_TAU,
-//     capped LOW (MAX_BACK_MULT×vmax) so a rail vehicle corrects by adjusting speed,
-//     never appearing to reverse fast — and never a backward teleport.
-// Genuine trip/shape discontinuity (> SD_SNAP_KM, or a backward jump > SD_BACK_KM)
-// is still an INSTANT snap, handled at ingest (applySnapshot), not here.
-const CATCHUP_TAU_MS = 550;    // behind-gap closes on ~this time constant (smooth-teleport speed)
-const MAX_CATCHUP_MULT = 12;   // …but never faster than this ×vmax (keeps a big slide perceptible)
-const BACK_TAU_MS = 1100;      // ahead-overshoot eases back on ~this (gentler than catch-up)
-const MAX_BACK_MULT = 0.45;    // …capped LOW so a tram never looks like it reverses fast
+// Per-mode forward-prediction LEAD: how far past the last fix the dead-reckon may run.
+// MUST be ≥ that mode's real fix interval — else the target can't reach where the vehicle
+// has actually travelled between sparse fixes and the dot lags PERMANENTLY (measured: trams
+// fix every 50–82 s, so a flat 30 s lead structurally lagged them 130–280 m). Values ≈ each
+// mode's p90 fix interval + margin (measured byMode_p90: tram 82 s, trolley 65 s, bus 50 s,
+// train 72 s, metro 14 s).
+const MAX_LEAD_MS_BY_MODE = { tram: 100000, trolleybus: 85000, bus: 70000, train: 95000, metro: 20000, ferry: 45000, funicular: 60000, cablecar: 60000, gondola: 60000, other: 60000 };
+const leadMs = (mode) => MAX_LEAD_MS_BY_MODE[mode] || 60000;
+const MAX_LEAD_KM = 1.5;       // absolute distance backstop for a stale/dead feed (raised from 0.9 so
+                               // the per-mode TIME lead, not the distance, governs normal motion).
+// --- BOUNDED VELOCITY-CORRECTION reconciliation (replaces the error-proportional chase) ---
+// The old dart: err/CATCHUP_TAU_MS(550) pegged at MAX_CATCHUP_MULT(12)×vmax = 780 km/h on any
+// err>~119 m, and routine inter-fix blocks are 132 m(p50)/345 m(p90)/1.4 km(max) — so EVERY fix
+// darted. Fix: the error NEVER moves position; it becomes a VELOCITY term (err/CONV_TAU) summed
+// onto cruise and HARD-CLAMPED to ≤SPEED_CAP_MULT×cruise BEFORE integration. Position only ever
+// advances by a clamped velocity×dt, so darting is impossible regardless of error magnitude —
+// peak draw speed is a believable ~1.6×cruise (tram ~28 km/h), not 780.
+const SPEED_CAP_MULT = 1.6;    // rendered speed ≤ 1.6× the vehicle's OWN cruise (vSd). The ~0.6×cruise
+                               // headroom closes routine lag within a fix interval; tram peak ≈28 km/h.
+                               // THE anti-dart bound — never raise past ~1.8.
+const BACK_MULT = 0.08;        // an over-prediction settles backward at ≤0.08×vmax (tram ~5 km/h): a
+                               // gentle, barely-perceptible correction, never a fast reverse/teleport.
+const CRUISE_FLOOR = 0.20;     // when vEff≈0 the corrector may target ≥0.20×vmax so a just-departed/cold
+                               // vehicle pulls away (tram ~13 km/h). Only raises when vEff is below it.
+const MIN_CAP_FRAC = 0.30;     // floor for the speed-cap denominator so the cap isn't 0 when cruise≈0:
+                               // a cold/stopped vehicle may ramp to SPEED_CAP_MULT×0.30×vmax.
+const ACCEL_TAU_MS = 800;      // velocity-onset smoothing (1−exp(−dt/τ)): a fix never step-changes the
+                               // rendered speed; a believable sub-second accel ramp. ≪ CONV_TAU.
+// Convergence time-constant: residual err is bled into velocity over ~this long, PER MODE. Metro is
+// floored well above its 5 s fix gap so the dense+noisy feed doesn't pulse; sparse modes are short
+// enough to close a residual within ~one fix interval (measured fix p50: metro 5 s, bus 19 s, tram 50 s).
+const CONV_TAU_MS_BY_MODE = { metro: 12000, train: 12000, bus: 12000, trolleybus: 20000, tram: 22000, ferry: 15000, funicular: 20000, cablecar: 20000, gondola: 20000, other: 15000 };
+const convTau = (mode) => CONV_TAU_MS_BY_MODE[mode] || 15000;
 const SD_MOVE_KM = 0.012;      // a fix advancing < this (≈12 m) is treated as stationary → hold
-const APPROACH_KM = 0.05;      // within this distance of the next-stop bound, ease the chase rate down
-                              // so a vehicle DECELERATES into the stop instead of slamming to a halt.
+const APPROACH_KM = 0.05;      // within this distance of the NEXT STOP, ease the velocity down so a
+                               // vehicle DECELERATES into the stop (gated to real stops, NOT the lead cap).
 // Per-mode chainage-speed ceiling (km/h) — clamps only the velocity ESTIMATE so a
 // single glitchy fix can't inject an absurd predicted speed. Real motion is
 // governed by the measured EMA; this is just a sanity ceiling.
@@ -1255,6 +1264,7 @@ function applySnapshot(snap) {
         // vehicle dead-reckons IMMEDIATELY instead of freezing until its own 2nd fix
         // (~20-40s). Falls back to 0 when the field is absent (old feed).
         sd: nv.sd, sdTarget: nv.sd, vSd: (typeof nv.vsd === 'number' ? nv.vsd : 0),
+        vRender: (typeof nv.vsd === 'number' ? nv.vsd : 0),  // rendered chainage velocity; seed = cold-start glide
         kmh: nv.spd != null && nv.spd !== '' ? Math.round(Number(nv.spd)) : null, moving: null,
         fixTs: nv.ts || Date.now(), fixMono: now, motT: now, dwell: nv.st === 'at_stop',
         eLon: 0, eLat: 0, eT0: null, eDur: SMOOTH_MS, railed: false,
@@ -1292,7 +1302,7 @@ function applySnapshot(snap) {
       dbgBranch = farPt ? 'point-snap' : 'point';
     } else if (shapeChanged || ex.sd == null || ex.sdTarget == null) {
       // New trip / first shaped fix → appear AT the fix on the rail, zero speed.
-      ex.sd = ex.sdTarget = nv.sd; ex.vSd = 0; ex.warp = true;
+      ex.sd = ex.sdTarget = nv.sd; ex.vSd = 0; ex.vRender = 0; ex.warp = true;
       dbgBranch = 'newtrip';
     } else {
       const dSd = nv.sd - ex.sdTarget;                   // signed advance since the last fix (km)
@@ -1305,7 +1315,7 @@ function applySnapshot(snap) {
       if (bigDisc || backRev || tooFast) {
         // One clean correction: snap render + truth to the fix on the rail, reset
         // speed, and WARP so renderPos jumps there this frame (no off-rail chord).
-        ex.sd = ex.sdTarget = nv.sd; ex.vSd = 0; ex.warp = true;
+        ex.sd = ex.sdTarget = nv.sd; ex.vSd = 0; ex.vRender = 0; ex.warp = true;
         dbgBranch = bigDisc ? 'snap-disc' : backRev ? 'snap-back' : 'snap-fast';
       } else {
         // NORMAL: update the forward velocity estimate (EMA, clamped ≥0 and ≤vmax)
@@ -1446,9 +1456,10 @@ function stepMotion(ts) {
     // against an open-loop run-through. Age uses the real fix timestamp, so feed
     // latency is compensated and v.sd tracks the actual current position.
     const vEff = (v.dwell && !stopAhead) ? 0 : Math.max(0, v.vSd || 0);
-    const ageMs = Math.min(MAX_LEAD_MS, Math.max(0, nowWall - (v.fixTs || nowWall)));
-    let sdReal = v.sdTarget + vEff * ageMs;                  // dead-reckoned target
-    let cap = v.sdTarget + Math.min(MAX_LEAD_KM, vEff * MAX_LEAD_MS); // stale-feed lead guard
+    const lead = leadMs(v.props && v.props.mode);            // per-mode lead ≈ this mode's fix interval
+    const ageMs = Math.min(lead, Math.max(0, nowWall - (v.fixTs || nowWall)));
+    let sdReal = v.sdTarget + vEff * ageMs;                  // dead-reckoned target (extrapolated to now)
+    let cap = v.sdTarget + Math.min(MAX_LEAD_KM, vEff * lead); // stale-feed lead guard
 
     if (stopAhead) {
       cap = Math.min(cap, nsSd);                            // never overshoot the next stop
@@ -1463,35 +1474,39 @@ function stepMotion(ts) {
     if (sdReal > cap) sdReal = cap;
     if (total != null && sdReal > total) sdReal = total;
 
-    // UNIFIED ERROR-PROPORTIONAL reconciliation. err = how far the dead-reckoned
-    // truth is from the rendered chainage; its SIGN picks the regime, its MAGNITUDE
-    // picks the speed — so "catch up a little" and "smooth-teleport a lot" are one law.
+    // BOUNDED VELOCITY CORRECTION. err = how far the dead-reckoned truth is from the
+    // rendered chainage. It enters ONLY as a velocity term — there is NO err-derived
+    // position move anywhere — so the per-frame spatial step is bounded by the clamped
+    // vRender regardless of how large err is. Darting is mathematically impossible.
     const err = sdReal - v.sd;
     const vmax = vmaxKmMs(v.props && v.props.mode);
-    if (err > 0) {
-      // BEHIND truth → chase FORWARD. Base = the vehicle's own speed (or the
-      // just-departed CHASE_FLOOR); the err/CATCHUP_TAU term adds catch-up that
-      // SCALES with the gap — a small lag is a gentle speed-up, a large lag a fast
-      // eased slide that closes in ~CATCHUP_TAU (decelerating as it arrives, since
-      // the term shrinks with err). Capped so a huge gap stays a perceptible slide,
-      // not an instant jump. Ease down inside APPROACH_KM of the bound so the vehicle
-      // decelerates INTO the next stop rather than slamming to a halt.
-      let rateKmMs = Math.max(vEff, vmax * CHASE_FLOOR, err / CATCHUP_TAU_MS);
-      rateKmMs = Math.min(rateKmMs, vmax * MAX_CATCHUP_MULT);
-      const toCap = cap - v.sd;
-      if (toCap > 0 && toCap < APPROACH_KM) rateKmMs *= Math.max(0.18, toCap / APPROACH_KM);
-      v.sd += Math.min(err, rateKmMs * dt);
-    } else if (err < 0) {
-      // AHEAD of truth (we over-predicted — the vehicle slowed/stopped more than
-      // estimated) → ease the render BACK by adjusting speed only. Rate scales with
-      // the overshoot but is capped LOW (MAX_BACK_MULT×vmax) so a rail vehicle never
-      // appears to reverse fast — a subtle settle, never a backward teleport. Bounded
-      // by the gap so it can't overshoot truth.
-      const gap = -err;
-      const backRate = Math.min(gap / BACK_TAU_MS, vmax * MAX_BACK_MULT);
-      v.sd -= Math.min(gap, backRate * dt);
+    const tau = convTau(v.props && v.props.mode);
+    // Cruise the corrector relaxes toward (a floor lets a just-departed/cold vehicle pull away):
+    const vCruise = (err > 0) ? Math.max(vEff, vmax * CRUISE_FLOOR) : vEff;
+    // The correction is a VELOCITY (km/ms), bled in over ~one convergence interval for this mode:
+    let vCmd = vCruise + err / tau;
+    // HARD anti-dart clamp BEFORE integration: ≤ SPEED_CAP_MULT×cruise forward (a believable mode
+    // speed), and only a small negative settle backward (never a fast reverse / backward teleport):
+    const capUp = SPEED_CAP_MULT * Math.max(vCruise, vmax * MIN_CAP_FRAC);
+    if (vCmd > capUp) vCmd = capUp;
+    if (vCmd < -vmax * BACK_MULT) vCmd = -vmax * BACK_MULT;
+    // Smooth the velocity onset so a fix never step-changes the rendered speed:
+    const aF = 1 - Math.exp(-dt / ACCEL_TAU_MS);
+    v.vRender = (v.vRender == null) ? vCmd : v.vRender + (vCmd - v.vRender) * aF;
+    // Decelerate INTO the NEXT STOP only (the tram-26 approach-decel). Gated to a real stop —
+    // NOT the always-present stale-feed lead cap, which would freeze-lurch the sparse-fix trams.
+    if (stopAhead && v.vRender > 0) {
+      const toStop = nsSd - v.sd;
+      if (toStop > 0 && toStop < APPROACH_KM) v.vRender *= Math.max(0.18, toStop / APPROACH_KM);
     }
+    // Integrate. Forward-biased; a behind-landing fix never reverses the render.
+    v.sd += v.vRender * dt;
+    // Never overrun truth (forward OR during a backward settle); never exceed the bounds.
+    if (err >= 0 && v.sd > sdReal) v.sd = sdReal;
+    else if (err < 0 && v.sd < sdReal) v.sd = sdReal;
+    if (v.sd > cap) v.sd = cap;
     if (total != null && v.sd > total) v.sd = total;
+    if (v.sd < 0) v.sd = 0;
   }
 }
 
