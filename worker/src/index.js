@@ -53,7 +53,11 @@ const stats = { source: SOURCE_MODE, intervalMs: POLL_INTERVAL_MS, ticks: 0, cou
 async function tick() {
   try {
     const vehicles = await fetchVehicles();
-    const payload = JSON.stringify({ t: Date.now(), src: SOURCE_MODE, n: vehicles.length, v: vehicles });
+    // `tid` (trip_id) is banked to ClickHouse by recordFixes() below but is NOT
+    // needed by the browser — drop it from the published snapshot so the firehose
+    // stays lean (the replacer skips the one key; recordFixes still reads v.tid).
+    const payload = JSON.stringify({ t: Date.now(), src: SOURCE_MODE, n: vehicles.length, v: vehicles },
+      (k, val) => (k === 'tid' ? undefined : val));
     await redis.set(KEY_SNAPSHOT, payload, 'EX', TTL_SEC);
     await redis.publish(CHANNEL, payload);
     // --- everything below is OFF the realtime critical path: the map is already

@@ -252,6 +252,7 @@ function normalize(f) {
     tnum,
     ns,
     nsid,
+    tid: tripId, // Golemio trip instance id — banked to ClickHouse (trip_id) to segment per-trip chainage history; not sent to the browser snapshot
     vsd: round(vsd, 7), // chainage speed (km/ms) — client seeds dead-reckoning from this on load
   };
 }

@@ -35,6 +35,7 @@ const DDL = `CREATE TABLE IF NOT EXISTS ${TABLE}
     \`speed\`       Nullable(Int16)        CODEC(ZSTD(1)),
     \`delay\`       Nullable(Int32)        CODEC(T64, ZSTD(1)),
     \`shape_id\`    LowCardinality(String) CODEC(ZSTD(1)),
+    \`trip_id\`     String                 CODEC(ZSTD(1)),
     \`shape_dist\`  Nullable(Float32)      CODEC(Gorilla, ZSTD(1)),
     \`headsign\`    LowCardinality(String) CODEC(ZSTD(1)),
     \`color\`       LowCardinality(String) CODEC(ZSTD(1)),
@@ -73,6 +74,12 @@ const COLUMN_MIGRATIONS = [
   `ALTER TABLE ${TABLE} ADD COLUMN IF NOT EXISTS \`next_stop_id\` LowCardinality(String) CODEC(ZSTD(1))`,
   `ALTER TABLE ${TABLE} ADD COLUMN IF NOT EXISTS \`next_stop_eta\` Nullable(Int32) CODEC(T64, ZSTD(1))`,
   `ALTER TABLE ${TABLE} ADD COLUMN IF NOT EXISTS \`canceled\` UInt8 DEFAULT 0 CODEC(ZSTD(1))`,
+  // trip_id: the Golemio per-trip instance id. HIGH cardinality (~50k distinct/day)
+  // so plain String, NOT LowCardinality. Banked to cleanly segment a vehicle's
+  // chainage history into individual trips — the grouping key for the per-(vehicle,
+  // trip) sd-vs-ts curve that splits sensor noise R from process noise Q, and the
+  // key the learned speed-corridor rollup aggregates within. Starts the data clock.
+  `ALTER TABLE ${TABLE} ADD COLUMN IF NOT EXISTS \`trip_id\` String CODEC(ZSTD(1))`,
 ];
 
 // ---- tunables --------------------------------------------------------------
@@ -226,6 +233,7 @@ function toRow(v) {
     speed: v.spd == null ? null : v.spd,
     delay: v.dl == null ? null : v.dl,
     shape_id: v.shp == null ? '' : String(v.shp),
+    trip_id: v.tid == null ? '' : String(v.tid),
     shape_dist: v.sd == null ? null : v.sd,
     headsign: v.hdsg == null ? '' : String(v.hdsg),
     color: v.color == null ? '' : String(v.color),
