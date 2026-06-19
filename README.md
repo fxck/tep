@@ -37,9 +37,10 @@ Managed stores: **PostgreSQL** (static GTFS), **Valkey** (hot snapshot + pub/sub
 
 ## Deploy your own
 
-One click via the Zerops recipe — pick **Small Production** (single-node) or
-**HA Production** (HA clusters). You'll be prompted for a free `GOLEMIO_API_KEY`
-([get one](https://api.golemio.cz/)).
+One click via the Zerops recipe — it ships the whole dev-lifecycle ladder: **AI Agent**
+and **Remote (CDE)** dev topologies, **Local** (stores only), **Stage**, and **Small**
+or **HA Production**. Set one project-level `GOLEMIO_API_KEY`
+([get a free key](https://api.golemio.cz/)) and it's injected into the api + worker.
 
 ▶ **[Deploy on Zerops](https://app.zerops.io/recipes/detail?github=https://github.com/fxck/tep)**
 
@@ -64,7 +65,7 @@ api/             Node HTTP API — REST + SSE over the Valkey snapshot
 web/             Vite + React + MapLibre GL + Three.js frontend
 worker/          Golemio GTFS-RT poller → Valkey + ClickHouse
 zerops.yaml      build/run setups for every service
-.zerops-recipe/  Zerops recipe manifest (Small + HA Production)
+.zerops-recipe/  Zerops recipe variants (AI Agent · Remote CDE · Local · Stage · Small/HA Production)
 ```
 
 ## Data & attribution
