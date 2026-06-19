@@ -1,22 +1,21 @@
-# Tep — live Prague public transport map
+# Tep — Zerops recipe
 
-This folder makes the repo deployable as a **Zerops recipe**. The fragments below
-(between the `#ZEROPS_EXTRACT_*` markers) are what the Zerops recipe page renders;
-everything outside the markers is plain GitHub README text and is ignored by the
-platform.
+See the [root README](../README.md) · live app: **[tep.today](https://tep.today)**
 
-<!-- #ZEROPS_EXTRACT_START:name# -->
-Tep
-<!-- #ZEROPS_EXTRACT_END:name# -->
+## Recipe metadata
 
-<!-- #ZEROPS_EXTRACT_START:shape# -->
-app
-<!-- #ZEROPS_EXTRACT_END:shape# -->
+- **Name:** <!-- #ZEROPS_EXTRACT_START:name# -->Tep<!-- #ZEROPS_EXTRACT_END:name# -->
+- **Shape:** <!-- #ZEROPS_EXTRACT_START:shape# -->app<!-- #ZEROPS_EXTRACT_END:shape# --> — you fork and deploy your own copy
+- **Environments:** `0 — Small Production` (single-node) · `1 — HA Production` (HA clusters)
+
+## Tagline
 
 <!-- #ZEROPS_EXTRACT_START:intro# -->
 A real-time map of every Prague tram, bus, metro and train, rendered on a WebGL
 vector map and streamed live to the browser over SSE.
 <!-- #ZEROPS_EXTRACT_END:intro# -->
+
+## Overview
 
 <!-- #ZEROPS_EXTRACT_START:description# -->
 Tep turns Prague's open transit feed into a fast, living map. A poller ingests the
@@ -31,9 +30,11 @@ The architecture is built for throughput and to leave room for a later 3D phase:
 the frontend is WebGL-capable from day one, and the API/worker split means you can
 scale the read path independently of the ingest path.
 
-Pick an environment below to match your needs — a lean single-node setup to
-evaluate, or a fully highly-available topology for real traffic.
+Two environments are available — a lean single-node setup to evaluate, and a fully
+highly-available topology that matches the live tep.today deployment.
 <!-- #ZEROPS_EXTRACT_END:description# -->
+
+## Features
 
 <!-- #ZEROPS_EXTRACT_START:features# -->
 - **Live vehicle map** — hundreds of trams, buses, metro and trains updating in real time on a smooth WebGL vector map.
@@ -45,6 +46,8 @@ evaluate, or a fully highly-available topology for real traffic.
 - **3D-ready frontend** — WebGL/MapLibre + Three.js, designed to grow into real 3D vehicle models.
 - **One repo, one click** — monorepo (api + worker + web) deploys as a complete project from a single recipe.
 <!-- #ZEROPS_EXTRACT_END:features# -->
+
+## First-run setup
 
 <!-- #ZEROPS_EXTRACT_START:takeover-guide# -->
 **Set your Golemio API key.** Tep reads Prague's open data through the Golemio API,
@@ -64,6 +67,8 @@ no stops/route lines are drawn — vehicles are unaffected.
 own domain in Project → Public Access). The frontend reaches the API through the
 `api` service's own subdomain (CORS is open), which the build wires automatically.
 <!-- #ZEROPS_EXTRACT_END:takeover-guide# -->
+
+## Knowledge base
 
 <!-- #ZEROPS_EXTRACT_START:knowledge-base# -->
 ### Architecture
