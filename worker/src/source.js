@@ -46,7 +46,15 @@ const round = (n, d) => { const f = 10 ** d; return Math.round(n * f) / f; };
 const VMAX_KMH_VSD = { tram: 65, metro: 90, train: 150, bus: 70, trolleybus: 65, ferry: 35, funicular: 30, cablecar: 30, gondola: 30, other: 95 };
 const vmaxKmMsVsd = (m) => (VMAX_KMH_VSD[m] || 90) / 3.6e6;
 const VSD_EMA = 0.45;            // matches the client's V_EMA
-const vsdState = new Map();      // id -> { sd, ts, shp, vsd }  (km, ms, shapeId, km/ms)
+// Metro fixes are dense (~5 s) and synthetic-feeling; the per-fix Δsd/Δt quantizes into a
+// ~24 km/h speed swing. For metro we median-filter the last 3 raw samples BEFORE the EMA — a
+// median rejects the isolated quantization spikes WITHOUT the lag a heavier EMA would add (so a
+// real station accel/decel still tracks). Sparse modes (tram/bus, 20–50 s) keep the plain
+// single-sample path: a 3-fix median there would span minutes and lag badly. The client renders
+// the metro vsd directly (main.js), so this is the single smoothing authority for that mode.
+const VSD_MEDIAN_MODES = new Set(['metro']);
+const median3 = (a) => { const s = a.slice().sort((x, y) => x - y); return s[(s.length - 1) >> 1]; };
+const vsdState = new Map();      // id -> { sd, ts, shp, vsd, vh }  (km, ms, shapeId, km/ms, sample ring)
 
 export async function fetchVehicles() {
   return SOURCE_MODE === 'golemio' ? fetchGolemio() : demoVehicles();
@@ -157,25 +165,32 @@ function normalize(f) {
   // shape/trip change or discontinuity; HELD between fixes (ts unchanged) so the
   // estimate persists into every snapshot the client might refresh against.
   let vsd = 0;
+  let vh;                                     // metro sample ring (km/ms), carried across fixes
   if (sd != null && ts) {
     const vk = String(id);
     const prev = vsdState.get(vk);
+    vh = prev && prev.vh;
     if (prev && prev.shp === shp && prev.sd != null && prev.ts) {
       if (ts > prev.ts) {
         const dSd = sd - prev.sd;            // km since last fix
         const dt = ts - prev.ts;             // ms since last fix
         const sane = dt > 0 && dSd > -0.4 && Math.abs(dSd) < 3; // mirror client SD_BACK / SD_SNAP
         if (sane) {
-          const vAct = Math.min(Math.max(0, dSd) / dt, vmaxKmMsVsd(meta.mode));
+          let vAct = Math.min(Math.max(0, dSd) / dt, vmaxKmMsVsd(meta.mode));
+          if (VSD_MEDIAN_MODES.has(meta.mode)) {   // dense feed → median-of-3 before the EMA
+            vh = (prev.vh || []).concat(vAct).slice(-3);
+            vAct = median3(vh);
+          }
           const base = prev.vsd != null ? prev.vsd : vAct;
           vsd = base + (vAct - base) * VSD_EMA;
+        } else {
+          vh = undefined;                     // turnaround/glitch → drop the ring with the estimate
         }
-        // else: trip turnaround / glitch → vsd stays 0 (distrust the speed)
       } else {
         vsd = prev.vsd || 0;                  // same fix (no new GPS) → keep the estimate
       }
     }
-    vsdState.set(vk, { sd, ts, shp, vsd });
+    vsdState.set(vk, { sd, ts, shp, vsd, vh });
   }
 
   // Rich per-vehicle fields (defensive — many are null for some vehicles).
