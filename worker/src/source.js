@@ -11,6 +11,7 @@
 
 import { getShapeId, getRouteColor, getStopName, getStopPos } from './gtfs.js';
 import { getModel } from './fleet.js';
+import { updateEstimator, pruneEstimator } from './estimator.js';
 
 const GOLEMIO_URL = process.env.GOLEMIO_URL || 'https://api.golemio.cz/v2/vehiclepositions';
 const API_KEY = (process.env.GOLEMIO_API_KEY || '').trim();
@@ -96,6 +97,7 @@ async function fetchGolemio() {
   if (out.length) {
     const live = new Set(out.map((v) => v.id));
     for (const k of vsdState.keys()) if (!live.has(k)) vsdState.delete(k);
+    pruneEstimator(live);
   }
   return out;
 }
@@ -193,6 +195,11 @@ function normalize(f) {
     vsdState.set(vk, { sd, ts, shp, vsd, vh });
   }
 
+  // Worker-authoritative chainage estimator (flag-gated per mode via PRED_MODES).
+  // Returns {esd, ev} only for estimated modes; null otherwise → the record carries
+  // NO esd field → the client takes its byte-identical v1.0.12 path.
+  const est = (sd != null && ts) ? updateEstimator(String(id), meta.mode, sd, ts, shp) : null;
+
   // Rich per-vehicle fields (defensive — many are null for some vehicles).
   const cis = trip.cis || {};
   const st = firstStr([last.state_position, props.state_position]); // 'on_track' | 'at_stop'
@@ -254,6 +261,10 @@ function normalize(f) {
     nsid,
     tid: tripId, // Golemio trip instance id — banked to ClickHouse (trip_id) to segment per-trip chainage history; not sent to the browser snapshot
     vsd: round(vsd, 7), // chainage speed (km/ms) — client seeds dead-reckoning from this on load
+    // Estimator output (present ONLY for flag-enabled modes): esd = filtered chainage
+    // anchor (km), ev = filtered chainage velocity (km/ms). The client uses these as its
+    // dead-reckon target + velocity instead of the raw fix + its own EMA.
+    ...(est ? { esd: est.esd, ev: est.ev } : {}),
   };
 }
 
