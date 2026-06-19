@@ -135,6 +135,14 @@ const ACCEL_TAU_MS = 800;      // velocity-onset smoothing (1−exp(−dt/τ)): 
 // enough to close a residual within ~one fix interval (measured fix p50: metro 5 s, bus 19 s, tram 50 s).
 const CONV_TAU_MS_BY_MODE = { metro: 12000, train: 12000, bus: 12000, trolleybus: 20000, tram: 22000, ferry: 15000, funicular: 20000, cablecar: 20000, gondola: 20000, other: 15000 };
 const convTau = (mode) => CONV_TAU_MS_BY_MODE[mode] || 15000;
+// Phase-2 confidence-gated convergence. When the worker estimator is active, the fixed CONV_TAU is
+// replaced by tau_eff ∈ [TAU_MIN_MS, convTau(mode)]: a FRESH + CONFIDENT estimate (low posStd, low
+// age) converges the render in ~TAU_MIN (fast catch-up → less lag); a STALE / uncertain one relaxes
+// to the baseline convTau (gentle). The cap end equals the baseline, so tau_eff can never regress
+// past v1.0.12. EPS_REF ≈ the mode's fresh-fix posStd (≈ measured σ_R), the scale for the gate.
+const TAU_MIN_MS = 8000;
+const EPS_REF_KM_BY_MODE = { tram: 0.154, trolleybus: 0.194, bus: 0.080, train: 0.055, metro: 0.045, other: 0.10 };
+const epsRefKm = (mode) => EPS_REF_KM_BY_MODE[mode] || 0.10;
 const SD_MOVE_KM = 0.012;      // a fix advancing < this (≈12 m) is treated as stationary → hold
 const APPROACH_KM = 0.05;      // within this distance of the NEXT STOP, ease the velocity down so a
                                // vehicle DECELERATES into the stop (gated to real stops, NOT the lead cap).
@@ -1289,6 +1297,7 @@ function applySnapshot(snap) {
         // cap governor; vEma is the spike-proof anti-dart denominator; sdRealPrev is the
         // ratchet floor. All inert when est=false (byte-identical v1.0.12).
         est: estNew, vEma: estNew ? seedV : null, sdRealPrev: null,
+        posStd: estNew ? nv.eps : null,   // filter position std (km) — gates tau_eff in stepMotion
         kmh: nv.spd != null && nv.spd !== '' ? Math.round(Number(nv.spd)) : null, moving: null,
         fixTs: nv.ts || Date.now(), fixMono: now, motT: now, dwell: nv.st === 'at_stop',
         eLon: 0, eLat: 0, eT0: null, eDur: SMOOTH_MS, railed: false,
@@ -1327,6 +1336,7 @@ function applySnapshot(snap) {
     const est = typeof nv.esd === 'number' && nv.sd != null;
     const anchor = est ? nv.esd : nv.sd;
     ex.est = est;
+    ex.posStd = est ? nv.eps : null;                     // filter position std (km) for tau_eff gating
     if (nv.sd == null) {
       // No chainage in the feed → pure point-mode (GPS lerp), no prediction.
       ex.sd = ex.sdTarget = null; ex.vSd = 0; ex.est = false;
@@ -1543,8 +1553,18 @@ function stepMotion(ts) {
     // position move anywhere — so the per-frame spatial step is bounded by the clamped
     // vRender regardless of how large err is. Darting is mathematically impossible.
     const err = sdReal - v.sd;
-    const vmax = vmaxKmMs(v.props && v.props.mode);
-    const tau = convTau(v.props && v.props.mode);
+    const mode = v.props && v.props.mode;
+    const vmax = vmaxKmMs(mode);
+    // Convergence time-constant. Baseline = fixed convTau. With the estimator active, gate it on
+    // filter confidence (posStd) and fix staleness (age/lead): fresh+confident → TAU_MIN (fast),
+    // stale/uncertain → convTau (gentle). max() means the WORST of the two dimensions governs.
+    let tau = convTau(mode);
+    if (v.est && v.posStd != null) {
+      const tauMin = Math.min(TAU_MIN_MS, tau);
+      const gA = Math.min(1, v.posStd / (2 * epsRefKm(mode)));   // covariance uncertainty
+      const gB = Math.min(1, ageMs / lead);                      // staleness
+      tau = tauMin + (tau - tauMin) * Math.max(gA, gB);
+    }
     // Cruise the corrector relaxes toward (a floor lets a just-departed/cold vehicle pull away).
     // Uses the GOVERNOR lane (vGov), not vEff, so the anti-dart ceiling never tracks a fresh
     // estimator velocity spike (must-fix #2). vGov==vEff when the estimator is off.
