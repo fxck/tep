@@ -819,7 +819,7 @@ async function replay(sp) {
         SELECT
           vehicle_id, ts, lat, lon, bearing, delay, shape_dist, shape_id, line, mode, color,
           row_number() OVER (
-            PARTITION BY vehicle_id, toStartOfInterval(ts, toIntervalSecond({bucketSec:UInt32}))
+            PARTITION BY vehicle_id, toStartOfInterval(ts, toIntervalSecond(${bucketSec}))
             ORDER BY ts ASC
           ) AS rnb
         FROM ${TABLE}
@@ -849,7 +849,7 @@ async function replay(sp) {
     GROUP BY vehicle_id`;
 
   const rows = await query(sql, {
-    from, to, line, mode, bucketSec,
+    from, to, line, mode,
     maxVehicles: REPLAY_MAX_VEHICLES,
     maxFixes: REPLAY_MAX_FIXES,
   });
