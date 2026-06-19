@@ -73,6 +73,18 @@ let glideSpeeds = [];
 // realistic top speed; a flood of `overspeed` (>108 km/h) means a catch-up dash.
 let renderSpeeds = [], maxRenderMps = 0, overspeed = 0, lastFrameTs = null;
 
+// --- ON-RAIL INVARIANT metrics (chainage-space — the gate the spatial/predicted
+// counters above are STRUCTURALLY BLIND to). backwardGlides reads ex.vSd which is
+// clamped ≥0, so it can NEVER fire; the real reverse happens in stepMotion when v.sd
+// DECREASES frame-to-frame. And overtaking is invisible to any per-vehicle metric.
+//   • backwardRender = frames where a routed vehicle's chainage stepped BACKWARD
+//     (excluding intended warps: new trip / shape change / >SD_BACK reversal). MUST be 0.
+//   • overtakes = per-frame chainage-ORDER inversions between two rail vehicles sharing
+//     one shape (= one physical track) — a visible same-track pass. MUST be 0.
+let backwardRender = 0, maxBackM = 0, overtakes = 0;
+const lastSdById = new Map();    // id -> last-frame chainage (km), for the backward-render test
+const ovPrevSd = new Map();      // id -> last-frame chainage (km), for the order-inversion test
+
 // --- TRACKING-ERROR / SILENT-LAG metric (Phase 0 of the prediction roadmap) ----
 // The teleport/backward/fast counters above are BLIND to a smoothly-lagging
 // estimator: a corrector whose convergence is too slow (or a Kalman with too-low
@@ -134,8 +146,21 @@ export function dbgFrame(fleet, ts, refOf, shapeReadyOf) {
 
   for (const v of fleet.values()) {
     const id = (v.props && v.props.id) != null ? v.props.id : v;
+    const warped = !!v.warp;          // read BEFORE refOf — renderPos consumes the warp flag
     const s = refOf(v);
     if (!s || !isFinite(s.lon) || !isFinite(s.lat)) { v._dbgPending = false; continue; }
+
+    // BACKWARD-RENDER (the real reverse test): a routed vehicle whose rendered
+    // chainage stepped backward this frame, excluding intended warps (new trip /
+    // shape change / >SD_BACK reversal, all of which set v.warp). > 0.5 m guards float noise.
+    if (v.sd != null) {
+      const psd = lastSdById.get(id);
+      if (psd != null && !warped) {
+        const backM = (psd - v.sd) * 1000;
+        if (backM > 0.5) { backwardRender++; if (backM > maxBackM) maxBackM = backM; }
+      }
+      lastSdById.set(id, v.sd);
+    }
 
     const ready = shapeReadyOf ? !!shapeReadyOf(v) : false;
     const wasReady = shapeWasReady.get(id);
@@ -172,6 +197,38 @@ export function dbgFrame(fleet, ts, refOf, shapeReadyOf) {
     last.set(id, { lon: s.lon, lat: s.lat });
     shapeWasReady.set(id, ready);
     v._dbgPending = false;        // consume: a snapshot's effect shows within 1 frame
+  }
+
+  // OVERTAKE detector: among rail vehicles sharing one shape (= one track), count
+  // pairs whose chainage ORDER flipped since last frame (a visible same-track pass).
+  // O(group²), debug-only; rail groups are small.
+  const ovGroups = new Map();
+  for (const v of fleet.values()) {
+    if (v.sd == null || !v.shp) continue;
+    const mode = v.props && v.props.mode;
+    if (mode !== 'tram' && mode !== 'metro' && mode !== 'train') continue;
+    let g = ovGroups.get(v.shp);
+    if (!g) { g = []; ovGroups.set(v.shp, g); }
+    g.push(v);
+  }
+  for (const g of ovGroups.values()) {
+    if (g.length < 2) continue;
+    for (let i = 0; i < g.length; i++) {
+      for (let j = i + 1; j < g.length; j++) {
+        const a = g[i], b = g[j];
+        const ia = (a.props && a.props.id) != null ? a.props.id : a;
+        const ib = (b.props && b.props.id) != null ? b.props.id : b;
+        const pa = ovPrevSd.get(ia), pb = ovPrevSd.get(ib);
+        if (pa == null || pb == null) continue;
+        // order flipped iff sign(prev a−b) != sign(now a−b); >2 m apart both frames to ignore jitter
+        if ((pa - pb) * (a.sd - b.sd) < 0 && Math.abs(pa - pb) > 0.002 && Math.abs(a.sd - b.sd) > 0.002) overtakes++;
+      }
+    }
+  }
+  for (const v of fleet.values()) {
+    if (v.sd == null) continue;
+    const id = (v.props && v.props.id) != null ? v.props.id : v;
+    ovPrevSd.set(id, v.sd);
   }
 
   if (ts - windowStart >= SUMMARY_MS) emit(ts);
@@ -214,7 +271,10 @@ function emit(ts) {
     // EVENT metrics (framerate-independent — the real teleport test):
     ev: {
       retargets,
-      backwardGlides,             // MUST be 0 — vehicle rendered driving backward
+      backwardRender,             // MUST be 0 — chainage stepped BACKWARD on screen (real reverse, warps excluded)
+      maxBackM: Math.round(maxBackM),  // worst single-frame backward step (m)
+      overtakes,                  // MUST be 0 — same-track chainage-order inversions (a visible pass)
+      backwardGlides,             // (legacy, structurally 0 — kept for continuity)
       fastGlides,                 // glides >180 km/h (forward streak)
       instantSnaps,               // gap>SNAP_HARD instant jumps (true teleports left)
       backwardHeld,               // backward GPS noise correctly held (good, expected >0)
@@ -261,6 +321,7 @@ function emit(ts) {
   lagByMode.clear();
   renderSpeeds = []; maxRenderMps = 0; overspeed = 0;
   teleports = 0; frames = 0; retargets = 0;
+  backwardRender = 0; maxBackM = 0; overtakes = 0;
   backwardGlides = 0; fastGlides = 0; instantSnaps = 0; backwardHeld = 0; snapBacks = 0;
   maxGlideMps = 0; maxSlideMps = 0;
   windowStart = ts;

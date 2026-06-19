@@ -154,6 +154,19 @@ const SD_PARK_KM = 0.010;      // final ~10 m of that approach (or any distance 
 const VMAX_KMH = { tram: 65, metro: 90, train: 150, bus: 70, trolleybus: 65, ferry: 35, funicular: 30, cablecar: 30, gondola: 30, other: 95 };
 const vmaxKmMs = (mode) => (VMAX_KMH[mode] || 90) / 3.6e6; // km per millisecond
 
+// --- no-overtake (leader-follow) constraint --------------------------------
+// Vehicles sharing a GTFS shape run on ONE physical track (same line+pattern+
+// direction) and cannot pass one another. Each frame stepMotion orders the group
+// by chainage and caps every follower a vehicle-length behind the one ahead, so a
+// faster dead-reckoning estimate BUNCHES UP behind its leader instead of overtaking
+// it (and then snapping backward when the next fix corrects the impossible pass).
+// Rail only — buses/trolleybuses share road lanes and legitimately pass. The cap is
+// a FORWARD bound (like the stop/lead caps); it is floored at sdTarget so it can
+// never pull a vehicle backward. Gaps ≈ vehicle length (centre-to-centre min).
+const NO_OVERTAKE_MODES = new Set(['tram', 'metro', 'train']);
+const FOLLOW_GAP_KM_BY_MODE = { tram: 0.022, metro: 0.075, train: 0.055 };
+const followGapKm = (mode) => FOLLOW_GAP_KM_BY_MODE[mode] || 0.030;
+
 // --- bidirectional track separation (item A) --------------------------------
 // Opposing directions share one coincident centerline in the GTFS shapes. We
 // shift each vehicle to the RIGHT of its travel heading so the two directions
@@ -1059,7 +1072,11 @@ map.on('load', () => {
     if (ui.selectedId == null) return { onScreen: false };
     const sel = fleet.get(ui.selectedId);
     if (!sel || !passesFilter(sel)) return { onScreen: false };
-    const s = renderPos(sel, performance.now());
+    // Anchor on the BODY sampler (sampleAlong, the same on-rail read the 3D mesh uses),
+    // NOT renderPos. renderPos applies a per-frame spatial speed-limiter that the mesh
+    // does not, so on any catch-up the clamped card visibly TRAILS the model it labels —
+    // the "tooltip catching up with the model" artifact. Same value under normal motion.
+    const s = sampleAlong(sel, performance.now(), 0);
     if (!s || !isFinite(s.lon) || !isFinite(s.lat)) return { onScreen: false };
     const pt = map.project([s.lon, s.lat]);
     return { x: pt.x, y: pt.y, onScreen: true };
@@ -1484,6 +1501,27 @@ function nextStopChainage(v) {
 
 function stepMotion(ts) {
   const nowWall = Date.now();
+
+  // NO-OVERTAKE leader map (must-fix for visible same-track passing → backward snap).
+  // Built from the just-settled (pre-integration) chainage so the loop below reads a
+  // STABLE bound while it mutates each v.sd. v._leaderSd = the chainage of the next
+  // vehicle AHEAD on this shape (a value snapshot), or null when it's the leader / alone /
+  // not a rail mode. One sort per shared-track group; groups are small.
+  const followGroups = new Map();
+  for (const v of fleet.values()) {
+    v._leaderSd = null;
+    if (v.sd == null || !v.shp) continue;
+    if (!NO_OVERTAKE_MODES.has(v.props && v.props.mode)) continue;
+    let g = followGroups.get(v.shp);
+    if (!g) { g = []; followGroups.set(v.shp, g); }
+    g.push(v);
+  }
+  for (const g of followGroups.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => a.sd - b.sd);                       // ascending chainage = physical order on the rail
+    for (let i = 0; i < g.length - 1; i++) g[i]._leaderSd = g[i + 1].sd;
+  }
+
   for (const v of fleet.values()) {
     if (v.sd == null || v.sdTarget == null) continue;   // point-mode vehicles don't predict
     let dt = v.motT != null ? ts - v.motT : DRAW_INTERVAL;
@@ -1530,6 +1568,14 @@ function stepMotion(ts) {
         sdReal = Math.max(sdReal, v.sdTarget + (nsSd - v.sdTarget) * frac);
       }
     }
+    // NO-OVERTAKE cap: never advance within a vehicle-length of the one ahead on this
+    // SAME shape (one physical track). Floored at sdTarget so a follower that's already
+    // bunched just HOLDS — the cap is forward-only and can't induce a reverse. This is
+    // what kills the "two trams pass, then one snaps back" artifact at its source.
+    if (v._leaderSd != null) {
+      const followCap = Math.max(v.sdTarget, v._leaderSd - followGapKm(v.props && v.props.mode));
+      if (cap > followCap) cap = followCap;
+    }
     if (sdReal > cap) sdReal = cap;
     if (total != null && sdReal > total) sdReal = total;
 
@@ -1575,7 +1621,13 @@ function stepMotion(ts) {
     // speed), and only a small negative settle backward (never a fast reverse / backward teleport):
     const capUp = SPEED_CAP_MULT * Math.max(vCruise, vmax * MIN_CAP_FRAC);
     if (vCmd > capUp) vCmd = capUp;
-    if (vCmd < -vmax * BACK_MULT) vCmd = -vmax * BACK_MULT;
+    // FORWARD-ONLY on the rail. A routed vehicle must never RENDER backward to reconcile a
+    // behind-landing fix or a backward Kalman correction — it HOLDS until truth catches up
+    // instead (a brief pause reads far better than a visible reverse). Genuine reversals
+    // (>SD_BACK_KM, terminus turnarounds) still warp instantly via the snap-back branch, and
+    // a tightening stop/lead/no-overtake cap can still ease it back sub-metre. Replaces the
+    // old ≤BACK_MULT backward settle, which was the dominant smooth-reverse source.
+    if (vCmd < 0) vCmd = 0;
     // Smooth the velocity onset so a fix never step-changes the rendered speed:
     const aF = 1 - Math.exp(-dt / ACCEL_TAU_MS);
     v.vRender = (v.vRender == null) ? vCmd : v.vRender + (vCmd - v.vRender) * aF;
@@ -1742,7 +1794,7 @@ function updateSelectionAndFollow(ts) {
   const sel = fleet.get(ui.selectedId);
   if (!sel) { clearSelection(); return; }                 // vehicle gone from the feed (clearSelection→stopChase)
   if (!passesFilter(sel)) { if (src) src.setData(EMPTY_FC); stopChase(); return; } // hidden by filter
-  const s = renderPos(sel, ts);
+  const s = sampleAlong(sel, ts, 0);   // body sampler — ring + chase-cam track the mesh exactly (see getSelScreen)
   if (ui.follow) {
     // The yellow ring is the FOLLOW indicator (camera locked on this vehicle).
     // Plain selection is already shown by the highlighted pin/mesh + the anchored
@@ -1768,7 +1820,7 @@ function updatePins(ts, zoom) {
   const list = [];
   for (const v of fleet.values()) {
     if (!passesFilter(v)) continue;
-    const st = renderPos(v, ts);
+    const st = sampleAlong(v, ts, 0);   // body sampler — floating pins sit on the mesh, never trailing it
     if (st.lon < w || st.lon > e || st.lat < s || st.lat > n) continue;
     list.push({ id: v.props.id, lon: st.lon, lat: st.lat, line: v.props.line, color: v.props.color, dl: v.props.dl, selected: v.props.id === ui.selectedId });
     if (list.length >= PIN_CAP) break;
