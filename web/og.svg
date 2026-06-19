@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Source for public/og.png — 1200x630 social share card. Render:
+     rsvg-convert -w 1200 -h 630 og.svg -o public/og.png  (needs librsvg + Inter font) -->
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0c1322"/>
+      <stop offset="1" stop-color="#070a10"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="0.5" cy="0.42" r="0.75">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.45"/>
+    </radialGradient>
+    <radialGradient id="apexGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#2ee68a" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#2ee68a" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- faint transit-route texture (PID line colours) -->
+  <g fill="none" stroke-width="6" stroke-linecap="round" opacity="0.10">
+    <path d="M-40 120 C 240 60, 430 230, 760 150 S 1180 60, 1260 140" stroke="#1A66B0"/>
+    <path d="M-40 540 C 260 600, 520 430, 820 520 S 1180 600, 1260 500" stroke="#00A562"/>
+    <path d="M-40 300 C 300 360, 540 240, 900 330 S 1240 420, 1260 360" stroke="#f0820a"/>
+    <path d="M740 -40 C 820 200, 1040 300, 980 660" stroke="#8E44AD"/>
+  </g>
+
+  <!-- right-side pulse / EKG motif -->
+  <g>
+    <circle cx="820" cy="200" r="64" fill="url(#apexGlow)"/>
+    <polyline points="640,316 762,316 800,316 820,200 843,452 866,296 888,316 980,316 1012,288 1038,344 1062,316 1150,316"
+      fill="none" stroke="#eef3fa" stroke-width="5.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="820" cy="200" r="9" fill="#2ee68a"/>
+    <!-- live vehicle dots riding the line, in PID line colours -->
+    <g>
+      <circle cx="700" cy="316" r="16" fill="#00A562" opacity="0.18"/>
+      <circle cx="700" cy="316" r="8" fill="#00A562"/>
+      <circle cx="936" cy="316" r="16" fill="#f5d90a" opacity="0.18"/>
+      <circle cx="936" cy="316" r="8" fill="#f5d90a"/>
+      <circle cx="1108" cy="316" r="16" fill="#D81E2C" opacity="0.18"/>
+      <circle cx="1108" cy="316" r="8" fill="#D81E2C"/>
+    </g>
+  </g>
+
+  <!-- LIVE pill -->
+  <g>
+    <rect x="86" y="70" width="132" height="42" rx="21" fill="#ffffff" fill-opacity="0.05" stroke="#2ee68a" stroke-opacity="0.45"/>
+    <circle cx="114" cy="91" r="6" fill="#2ee68a"/>
+    <circle cx="114" cy="91" r="6" fill="#2ee68a" opacity="0.5" filter="url(#soft)"/>
+    <text x="132" y="98" font-family="Inter, 'Liberation Sans', Arial, sans-serif" font-size="22" font-weight="700" letter-spacing="3" fill="#cfeede">LIVE</text>
+  </g>
+
+  <!-- wordmark + tagline -->
+  <text x="82" y="330" font-family="Inter, 'Liberation Sans', Arial, sans-serif" font-size="184" font-weight="800" letter-spacing="-5" fill="#f4f7fb">Tep</text>
+  <text x="90" y="406" font-family="Inter, 'Liberation Sans', Arial, sans-serif" font-size="34" font-weight="500" fill="#aeb8c6">The pulse of Prague — trams, metro,</text>
+  <text x="90" y="450" font-family="Inter, 'Liberation Sans', Arial, sans-serif" font-size="34" font-weight="500" fill="#aeb8c6">buses &amp; trains, live on one map.</text>
+
+  <!-- url -->
+  <g>
+    <circle cx="98" cy="523" r="6" fill="#2ee68a"/>
+    <text x="114" y="531" font-family="Inter, 'Liberation Sans', Arial, sans-serif" font-size="32" font-weight="700" letter-spacing="0.5" fill="#2ee68a">tep.today</text>
+  </g>
+
+  <!-- credit -->
+  <text x="1150" y="600" text-anchor="end" font-family="Inter, 'Liberation Sans', Arial, sans-serif" font-size="22" font-weight="500" fill="#5d6b7e">Live open data · PID / Golemio · WebGL</text>
+
+  <!-- vignette on top -->
+  <rect width="1200" height="630" fill="url(#vignette)"/>
+</svg>
