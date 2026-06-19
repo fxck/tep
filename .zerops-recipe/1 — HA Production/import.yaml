@@ -1,0 +1,63 @@
+#zeropsPreprocessor=on
+
+# HA Production — highly-available managed clusters, app runtimes on dedicated CPU
+# autoscaling 2→4. Matches the topology behind the live tep.today.
+
+project:
+  name: tep
+  corePackage: SERIOUS
+  tags:
+    - tep
+    - public-transit
+    - maplibre
+
+services:
+  # ---- managed stores, HA clusters (start first) ----
+  - hostname: db
+    type: postgresql:ha@18
+    priority: 10
+  - hostname: cache
+    type: valkey:ha@7.2
+    priority: 10
+  - hostname: analytics
+    type: clickhouse:ha@25.3
+    priority: 10
+
+  # ---- ingest worker (one leader-writer elected across containers) ----
+  - hostname: worker
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: workerprod
+    minContainers: 2
+    maxContainers: 2
+    verticalAutoscaling:
+      cpuMode: DEDICATED
+    envSecrets:
+      GOLEMIO_API_KEY:          # required → deploy wizard prompts
+
+  # ---- read API (REST + SSE); its subdomain is what the web build targets ----
+  - hostname: api
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: apiprod
+    enableSubdomainAccess: true
+    minContainers: 2
+    maxContainers: 4
+    verticalAutoscaling:
+      cpuMode: DEDICATED
+    envSecrets:
+      GOLEMIO_API_KEY:          # required → deploy wizard prompts
+
+  # ---- WebGL frontend (built with VITE_API_BASE=${api_zeropsSubdomain}) ----
+  - hostname: web
+    type: nginx@1.22
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: webprodlive
+    enableSubdomainAccess: true
+    minContainers: 2
+    maxContainers: 4
+    verticalAutoscaling:
+      cpuMode: DEDICATED

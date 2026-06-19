@@ -1,0 +1,57 @@
+#zeropsPreprocessor=on
+
+# Small Production — single-node managed stores, app runtimes on shared CPU
+# autoscaling 1→2. Cheapest way to run Tep for real; not redundant.
+
+project:
+  name: tep
+  corePackage: LIGHT
+  tags:
+    - tep
+    - public-transit
+    - maplibre
+
+services:
+  # ---- managed stores (start first) ----
+  - hostname: db
+    type: postgresql:single@18
+    priority: 10
+  - hostname: cache
+    type: valkey:single@7.2
+    priority: 10
+  - hostname: analytics
+    type: clickhouse:single@25.3
+    priority: 10
+
+  # ---- ingest worker (Golemio poller → cache + ClickHouse) ----
+  - hostname: worker
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: workerprod
+    minContainers: 1
+    maxContainers: 1
+    envSecrets:
+      GOLEMIO_API_KEY:          # required → deploy wizard prompts
+
+  # ---- read API (REST + SSE); its subdomain is what the web build targets ----
+  - hostname: api
+    type: nodejs@24
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: apiprod
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 2
+    envSecrets:
+      GOLEMIO_API_KEY:          # required → deploy wizard prompts
+
+  # ---- WebGL frontend (built with VITE_API_BASE=${api_zeropsSubdomain}) ----
+  - hostname: web
+    type: nginx@1.22
+    priority: 5
+    buildFromGit: https://github.com/fxck/tep
+    zeropsSetup: webprodlive
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 2
