@@ -1,11 +1,15 @@
 # Tep — Live Motion Prediction & Reconciliation: Architecture & Roadmap
 
-> **Status:** Phases 0–2 IMPLEMENTED, A/B-verified on stage, all 4 surface modes enabled (2026-06-19).
-> Phase 0 (trip_id + lag metric + R/Q seed), Phase 1 (worker α-β), Phase 2 (worker 1-D Kalman +
-> client posStd/age-gated tau_eff). Measured: silent lag **roughly halved** for tram/bus/train/
-> trolley (e.g. tram absMean ~190 m → ~80 m headless) with **backwardGlides=0, fastGlides=0,
-> instantSnaps=0** every window and metro byte-identical. Per-mode flag = `PRED_MODES` env on the
-> worker (empty ⇒ byte-identical v1.0.12). Phases 3 (corridor) & 4 (feed-health/bunching) pending.
+> **Status:** Phases 0–2 SHIPPED + an accuracy-study-driven lever pass (**v1.0.18**), all 4 surface
+> modes enabled (2026-06-19). Phase 0 (trip_id + lag metric + R/Q seed), Phase 1 (worker α-β),
+> Phase 2 (worker 1-D Kalman + client posStd/age-gated tau_eff), **v1.0.18** (bus speed-fusion,
+> velocity-seed/carry, `evs` horizon-aware uncertainty, `next_stop_eta` forward-anchor, capped
+> forward lead, continuous `predErr` instrument — **see §7**). Measured one-step lag-bias after the
+> v1.0.18 pass: bus **−117 → −9 m**, train −145 → −87 m, tram −251 → −192 m, trolley −360 → −113 m,
+> metro pristine +26 → +10 m; **backwardGlides = fastGlides = instantSnaps = 0** every window. Per-mode
+> flag = `PRED_MODES` env on the worker (empty ⇒ byte-identical v1.0.12). **Phase 3 (learned speed
+> corridor) is the one deferred lever — blocked on ~4–8 weeks of trip_id history accrual, not on
+> code.** Phase 4 (feed-health auto-tune / bunching) is not yet built.
 > **Provenance:** synthesized from a 22-agent design workflow (5 independent architectures, each
 > adversarially vetted on 3 lenses, then synthesized + completeness-critiqued). 2026-06-19.
 > **Scope:** the *live* path only — how Tep turns a sparse/stale/jumpy GPS feed into smooth,
@@ -131,8 +135,11 @@ in `fastGlides`/`instantSnaps`/`overspeed`, **and** a new lag metric must not re
 | **0 — instrument + bank trip_id** | Add a **lag/tracking-error metric** to `motionDebug.js` (existing counters are blind to silent lag). **Bank `trip_id`** as a ClickHouse column (resolved at `source.js:157`, currently dropped) — starts the corridor data clock. Run the one-off R/Q seed query. *No motion change.* | ✅ |
 | **1 — α-β replaces EMA** | Swap per-vehicle EMA `vSd` for a 2-state α-β filter, seeded ≈ V_EMA. Keep `CONV_TAU`. Subsumes the metro median3 hack. Lowest risk. | ✅ |
 | **2 — full KF + gated τ** | Promote to full KF with live covariance; replace fixed `CONV_TAU` with `posStd`/age-gated `tau_eff` (8–30 s); forward-monotonic ratchet + innovation rectification + reuse the 3 snap triggers. *Pre-check: verify plain age-gated τ doesn't already capture the win before building full P.* | ✅ |
-| **3 — learned speed corridor** | Nightly CH corridor rollup → KF process model. Per-bin sample-count floor, corridor disabled in `APPROACH_KM`, live off-profile down-weight. Self-activates per-shape on measured coverage. | ✅ |
-| **4 — adaptive auto-tune + bunching** | Feed-health quantiles auto-tune per-(mode, ToD) lead / R age-penalty / fusion weights. Worker headway/bunching `bunchFactor ∈ [0.5, 1.2]`. | ✅ |
+| **3 — learned speed corridor** | Nightly CH corridor rollup → KF process model. Per-bin sample-count floor, corridor disabled in `APPROACH_KM`, live off-profile down-weight. Self-activates per-shape on measured coverage. | ⏳ deferred — data accruing (the residual tram lag, §7) |
+| **4 — adaptive auto-tune + bunching** | Feed-health quantiles auto-tune per-(mode, ToD) lead / R age-penalty / fusion weights. Worker headway/bunching `bunchFactor ∈ [0.5, 1.2]`. | ☐ not built |
+
+> **Between Phases 2 and 3** an accuracy study mined the *current* data for every remaining lever that
+> doesn't need the corridor's not-yet-accrued history, and shipped them as **v1.0.18 — see §7.**
 
 ### Feed-health (parallel substrate)
 A worker (leader-gated) periodic job computing per-(mode, ToD) **inter-fix interval** and **staleness**
@@ -208,6 +215,71 @@ gain to actual `dt` + accumulated covariance.
 5. **Micro-bench the client per-frame corridor lookup** (array-indexed `v̄` for ~1,800 vehicles @ 60 fps)
    against the 16 ms budget *before* Phase 3. If it doesn't clear, keep the per-frame integrate on the
    worker-emitted scalar `v` and apply the corridor only in the worker predict.
+
+---
+
+## 7. Accuracy study + v1.0.18 lever pass (post-roadmap, 2026-06-19)
+
+After Phases 0–2 shipped, a dedicated **accuracy study** measured how far the live render actually
+trails truth and which untapped signals could close the gap. It drove a second, data-validated lever
+pass (**v1.0.18**) — strictly additive to the Phase-2 estimator, changing **no invariant**.
+
+### Method — how every lever was gated
+- **Offline same-stream A/B replay.** A harness replays the *shipped* estimator over **~8.5 M real
+  fix-pairs** from ClickHouse `vehicle_fixes`, scoring **one-step prediction error**: the predicted
+  chainage extrapolated to the next fix's GPS timestamp, minus the actual next `shape_dist`. Base vs.
+  candidate run over **one identical stream in a single pass** — this is mandatory, not stylistic:
+  train RMSE is so tail-sensitive that `now()`-relative window drift between two separate runs swings
+  it ±70 m and *fabricates* regressions (we hit exactly this and it cost a debugging cycle).
+- **Live `predErr` instrument.** `motionDebug.js` now banks a continuous, horizon-bucketed `predErr`
+  (rendered chainage − next actual fix), surfaced in `?debug=motion` — the standing production monitor
+  for these exact numbers (it supersedes the one-off Phase-0 lag metric).
+- **Sign convention:** negative bias = rendered *behind* truth (too slow / lagging).
+
+### What the study found
+- Our estimator is the **lowest-RMSE of all baselines** (hold / constant-velocity) but **lag-biased**:
+  it systematically renders behind truth, worst for the sparse accelerating-from-stop modes.
+- The bias is **structural** (acceleration out of stops a constant-velocity model can't see across a
+  ~50 s gap), **not q-tunable** — a process-noise sweep could not remove it.
+- **Measurement-noise floor ≈ 125 m** surface / **≈ 210 m** train, irreducible at this cadence. Metro
+  already sits *below* its own floor → unimprovable; left byte-identical.
+- We were exploiting only **~3 of ~8 available signals.** The two biggest untapped ones: the feed's
+  reported **`speed`** (present on ~76 % of *buses*, previously ignored) and **`next_stop_eta`**
+  (100 % coverage, previously ignored).
+
+### The levers shipped (v1.0.18)
+**Worker (`estimator.js`):**
+1. **Bus speed-fusion** — the reported `speed` is fused as a *second* Kalman measurement on the velocity
+   state (UPDATE 2, `H=[0,1]`, `R_V` ≈ ±8 km/h). Injects a fresh velocity the chainage-delta filter
+   would otherwise have to ramp into → kills most of the bus cold-start / accel lag. Rail has no speed
+   field → no-op. **This supersedes the "no velocity signal" framing of §1 for buses** (§1 still holds
+   for the four rail-like modes).
+2. **Velocity-seed / carry on reset** — instead of a memoryless `v = 0` reset, seed from a fresh speed
+   obs when present, else carry pre-reset velocity through a *forward* data-jump. Gated to
+   `CARRY_MODES = {tram, trolleybus}` — the sparse, low-speed modes that pay the largest cold-start
+   lag. **Train is deliberately excluded:** both gap-carry and snap-carry independently fattened its
+   tails (+66–69 m RMSE in A/B); fast, fat-tailed modes over-predict on any carry.
+3. **`evs` (velocity std) emitted** — `√p11`, so the client can gate on **horizon-aware** uncertainty
+   `√(eps² + (evs·age)²)` instead of sensor noise alone.
+
+**Client (`main.js`):**
+4. **`next_stop_eta` forward-anchor** — validated usable only at a **30–600 s** lead (MAE ~27–34 s tram;
+   garbage < 30 s), it raises the lead cap toward the schedule pace. Gated to that window **and** to
+   estimator modes — metro's already-median path is untouched (an early version that pulled metro pushed
+   its bias +26 → +69 m; gating reverted it to pristine).
+5. **Horizon-aware `tau_eff`** — convergence rate now gates on the `evs`-extended uncertainty above.
+6. **Capped moving-only forward lead** — a small bounded forward nudge (`≤ 30 m`, moving non-dwell
+   vehicles, never within `APPROACH_KM` of a stop) for residual bias, under the **unchanged** anti-dart cap.
+
+### Measured result (offline + confirmed live on tep.today)
+- **Bus lag eliminated:** one-step bias **−117 → −9 m** (p50 one-step error 97 → 57 m, **−41 %**).
+- **Tram −24 %, train −40 %, trolley** large drop, **metro pristine (+26 → +10 m).**
+- **Zero regressions** — anti-dart / forward-bias / on-rail / brake-into-stops all intact; the train
+  estimator was explicitly protected.
+
+> **Still open:** the residual tram acceleration-lag (~−192 m) is exactly what **Phase 3's learned
+> speed corridor** targets — the one lever no current-data trick can reach, deferred only until the
+> `trip_id` history (banked since Phase 0) accrues the ~4–8 weeks of per-shape coverage it needs.
 
 ---
 

@@ -11,7 +11,7 @@ city's open transit feed.
 ## Features
 
 - **Live vehicle map** — hundreds of trams, buses, metro and trains updating in real time on a smooth WebGL vector map.
-- **Physically-grounded motion prediction** — the upstream feed is sparse (~50 s between tram fixes) and carries no speed, yet vehicles glide smoothly and on-rail. A worker-side **1-D Kalman chainage estimator** dead-reckons each vehicle along its route between fixes and reconciles when the next one lands — bounded so it can never dart, reverse or teleport. Parameters are seeded from the feed's own measured noise. See [docs/live-prediction-architecture.md](docs/live-prediction-architecture.md).
+- **Physically-grounded motion prediction** — the upstream feed is sparse (~50 s between tram fixes) and mostly carries no speed, yet vehicles glide smoothly and on-rail. A worker-side **1-D Kalman chainage estimator** dead-reckons each vehicle along its route between fixes and reconciles when the next one lands — fusing whatever extra signal exists (buses' reported speed, every mode's next-stop ETA) and bounded so it can never dart, reverse or teleport. Parameters are seeded from the feed's own measured noise; accuracy is monitored live via a `predErr` instrument. See [docs/live-prediction-architecture.md](docs/live-prediction-architecture.md).
 - **Sub-second updates over SSE** — the browser subscribes to a delta stream; no polling, no hammering the upstream feed.
 - **Cached read path** — a Valkey hot snapshot absorbs all client load; the public feed is polled once, centrally.
 - **Built-in analytics** — every position is banked to ClickHouse, powering punctuality, bunching, speed and delay views.
