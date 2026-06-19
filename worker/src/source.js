@@ -36,6 +36,18 @@ const firstStr = (arr) => { for (const x of arr) if (x != null && x !== '') retu
 const passBool = (arr) => { for (const x of arr) if (x === true || x === false) return x; return null; };
 const round = (n, d) => { const f = 10 ** d; return Math.round(n * f) / f; };
 
+// Per-vehicle chainage-speed estimate (km/ms), tracked ACROSS ticks so the snapshot
+// can carry a velocity the browser seeds on a fresh load. Without it a just-loaded
+// client starts every vehicle at vSd=0 and can't dead-reckon until its OWN 2nd real
+// fix (~20-40s later) — the "multiple seconds before anything moves" symptom. Mirrors
+// the client's V_EMA / vmax clamp. Process-local; pruned to the live set each tick;
+// reset on shape/trip change or a discontinuity. (Both worker instances keep their
+// own copy; only the leader's is emitted — see the single-writer note in index.js.)
+const VMAX_KMH_VSD = { tram: 65, metro: 90, train: 150, bus: 70, trolleybus: 65, ferry: 35, funicular: 30, cablecar: 30, gondola: 30, other: 95 };
+const vmaxKmMsVsd = (m) => (VMAX_KMH_VSD[m] || 90) / 3.6e6;
+const VSD_EMA = 0.45;            // matches the client's V_EMA
+const vsdState = new Map();      // id -> { sd, ts, shp, vsd }  (km, ms, shapeId, km/ms)
+
 export async function fetchVehicles() {
   return SOURCE_MODE === 'golemio' ? fetchGolemio() : demoVehicles();
 }
@@ -71,6 +83,11 @@ async function fetchGolemio() {
       if (v) out.push(v);
     }
     if (features.length < limit) break;
+  }
+  // Prune chainage-speed state to the vehicles we still see (bounds memory).
+  if (out.length) {
+    const live = new Set(out.map((v) => v.id));
+    for (const k of vsdState.keys()) if (!live.has(k)) vsdState.delete(k);
   }
   return out;
 }
@@ -134,6 +151,33 @@ function normalize(f) {
   const sdRaw = last.shape_dist_traveled;
   const sd = sdRaw != null && sdRaw !== '' && isFinite(Number(sdRaw)) ? Number(sdRaw) : null; // chainage along shape
 
+  // Chainage speed (km/ms) — EMA of Δsd/Δts across REAL fixes, emitted so the client
+  // seeds motion the instant it loads (vs waiting for its own 2nd fix). Recomputed
+  // only when a new fix lands (ts advanced) and the move is sane; reset to 0 on a
+  // shape/trip change or discontinuity; HELD between fixes (ts unchanged) so the
+  // estimate persists into every snapshot the client might refresh against.
+  let vsd = 0;
+  if (sd != null && ts) {
+    const vk = String(id);
+    const prev = vsdState.get(vk);
+    if (prev && prev.shp === shp && prev.sd != null && prev.ts) {
+      if (ts > prev.ts) {
+        const dSd = sd - prev.sd;            // km since last fix
+        const dt = ts - prev.ts;             // ms since last fix
+        const sane = dt > 0 && dSd > -0.4 && Math.abs(dSd) < 3; // mirror client SD_BACK / SD_SNAP
+        if (sane) {
+          const vAct = Math.min(Math.max(0, dSd) / dt, vmaxKmMsVsd(meta.mode));
+          const base = prev.vsd != null ? prev.vsd : vAct;
+          vsd = base + (vAct - base) * VSD_EMA;
+        }
+        // else: trip turnaround / glitch → vsd stays 0 (distrust the speed)
+      } else {
+        vsd = prev.vsd || 0;                  // same fix (no new GPS) → keep the estimate
+      }
+    }
+    vsdState.set(vk, { sd, ts, shp, vsd });
+  }
+
   // Rich per-vehicle fields (defensive — many are null for some vehicles).
   const cis = trip.cis || {};
   const st = firstStr([last.state_position, props.state_position]); // 'on_track' | 'at_stop'
@@ -193,6 +237,7 @@ function normalize(f) {
     tnum,
     ns,
     nsid,
+    vsd: round(vsd, 7), // chainage speed (km/ms) — client seeds dead-reckoning from this on load
   };
 }
 

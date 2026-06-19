@@ -101,6 +101,9 @@ const CHASE_FLOOR = 0.28;      // The render chases the dead-reckoned target at 
                                // Capping the chase at cruise (not 1.2×vmax, and certainly not the old
                                // flat 55 m/s ≈198 km/h) is the real fix for "moves stupidly fast":
                                // vehicles were chronically pegged at the catch-up cap, not cruising.
+const BACK_EASE_FRAC = 0.22;   // when a real fix lands BEHIND the prediction, ease the render back
+                               // toward truth at this fraction of vmax (≈4 m/s for a tram) — the gentle
+                               // "autocorrection" the forward-only hold lacked; never a backward jump.
 const SD_MOVE_KM = 0.012;      // a fix advancing < this (≈12 m) is treated as stationary → hold
 const APPROACH_KM = 0.05;      // within this distance of the next-stop bound, ease the chase rate down
                               // so a vehicle DECELERATES into the stop instead of slamming to a halt.
@@ -235,16 +238,21 @@ async function fetchMissingShapes(ids) {
   const missing = [...new Set(ids)].filter((id) => id && !shapes.has(id));
   if (!missing.length || !API_BASE) return;
   missing.forEach((id) => shapes.set(id, 'pending'));
-  for (let i = 0; i < missing.length; i += 100) {
-    const chunk = missing.slice(i, i + 100);
+  const chunks = [];
+  for (let i = 0; i < missing.length; i += 100) chunks.push(missing.slice(i, i + 100));
+  // Fetch all chunks CONCURRENTLY. Awaiting them sequentially serialized ~10
+  // round-trips of ~1.7 MB each on a cold load — multiple seconds during which every
+  // routed vehicle holds frozen at its last fix waiting for its geometry. Parallel,
+  // the whole set lands in ~one round-trip (browser caps concurrency itself).
+  await Promise.all(chunks.map(async (chunk) => {
     try {
       const r = await fetch(`${API_BASE}/api/shapes?ids=${chunk.join(',')}`);
-      if (!r.ok) { chunk.forEach((id) => shapes.delete(id)); continue; }
+      if (!r.ok) { chunk.forEach((id) => shapes.delete(id)); return; }
       const data = await r.json();
       for (const id of chunk) shapes.set(id, buildShape(data[id]));
       routesDirty = true;
     } catch { chunk.forEach((id) => shapes.delete(id)); }
-  }
+  }));
 }
 
 // --- interpolation state ----------------------------------------------------
@@ -1143,7 +1151,10 @@ function applySnapshot(snap) {
         // Forward-prediction state: the rendered chainage `sd` chases a dead-reckoned,
         // lead-capped, dwell-gated target `sdTarget` at the estimated speed `vSd`.
         // (null sd ⇒ the feed has no chainage for this vehicle ⇒ pure point-mode.)
-        sd: nv.sd, sdTarget: nv.sd, vSd: 0,
+        // SEED vSd from the worker's chainage-speed estimate so a freshly-loaded
+        // vehicle dead-reckons IMMEDIATELY instead of freezing until its own 2nd fix
+        // (~20-40s). Falls back to 0 when the field is absent (old feed).
+        sd: nv.sd, sdTarget: nv.sd, vSd: (typeof nv.vsd === 'number' ? nv.vsd : 0),
         kmh: nv.spd != null && nv.spd !== '' ? Math.round(Number(nv.spd)) : null, moving: null,
         fixTs: nv.ts || Date.now(), fixMono: now, motT: now, dwell: nv.st === 'at_stop',
         eLon: 0, eLat: 0, eT0: null, eDur: SMOOTH_MS, railed: false,
@@ -1362,6 +1373,14 @@ function stepMotion(ts) {
       const toCap = cap - v.sd;
       if (toCap > 0 && toCap < APPROACH_KM) rateKmMs *= Math.max(0.18, toCap / APPROACH_KM);
       v.sd += Math.min(sdReal - v.sd, rateKmMs * dt);
+    } else if (sdReal < v.sd) {
+      // AUTOCORRECTION: a real fix landed BEHIND the prediction (we over-shot — the
+      // vehicle slowed/stopped more than estimated). Ease the render back toward truth
+      // at a slow, capped rate — a gentle slide, NOT the old backward teleport — so a
+      // fix visibly corrects an over-predicted dot instead of holding it ahead until
+      // forward motion eventually catches up. Bounded by the gap so it never overshoots.
+      const backRate = vmaxKmMs(v.props && v.props.mode) * BACK_EASE_FRAC;
+      v.sd -= Math.min(v.sd - sdReal, backRate * dt);
     }
     if (total != null && v.sd > total) v.sd = total;
   }
