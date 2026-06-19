@@ -1,6 +1,11 @@
 # Tep — Live Motion Prediction & Reconciliation: Architecture & Roadmap
 
-> **Status:** design accepted (go-with-fixes), not yet implemented.
+> **Status:** Phases 0–2 IMPLEMENTED, A/B-verified on stage, all 4 surface modes enabled (2026-06-19).
+> Phase 0 (trip_id + lag metric + R/Q seed), Phase 1 (worker α-β), Phase 2 (worker 1-D Kalman +
+> client posStd/age-gated tau_eff). Measured: silent lag **roughly halved** for tram/bus/train/
+> trolley (e.g. tram absMean ~190 m → ~80 m headless) with **backwardGlides=0, fastGlides=0,
+> instantSnaps=0** every window and metro byte-identical. Per-mode flag = `PRED_MODES` env on the
+> worker (empty ⇒ byte-identical v1.0.12). Phases 3 (corridor) & 4 (feed-health/bunching) pending.
 > **Provenance:** synthesized from a 22-agent design workflow (5 independent architectures, each
 > adversarially vetted on 3 lenses, then synthesized + completeness-critiqued). 2026-06-19.
 > **Scope:** the *live* path only — how Tep turns a sparse/stale/jumpy GPS feed into smooth,
