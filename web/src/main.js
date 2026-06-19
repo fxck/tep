@@ -96,12 +96,15 @@ const SNAP_HARD_M = 1500;     // ≈ CATCHUP_MPS·SMOOTH_MAX_MS: only a GPS-glit
 // instead of lagging a whole fix behind.
 const V_EMA = 0.45;            // speed-estimate smoothing (EMA weight of each new fix)
 // Per-mode forward-prediction LEAD: how far past the last fix the dead-reckon may run.
-// MUST be ≥ that mode's real fix interval — else the target can't reach where the vehicle
-// has actually travelled between sparse fixes and the dot lags PERMANENTLY (measured: trams
-// fix every 50–82 s, so a flat 30 s lead structurally lagged them 130–280 m). Values ≈ each
-// mode's p90 fix interval + margin (measured byMode_p90: tram 82 s, trolley 65 s, bus 50 s,
-// train 72 s, metro 14 s).
-const MAX_LEAD_MS_BY_MODE = { tram: 100000, trolleybus: 85000, bus: 70000, train: 95000, metro: 20000, ferry: 45000, funicular: 60000, cablecar: 60000, gondola: 60000, other: 60000 };
+// MUST cover the FULL worst-case age of a fix before its successor lands — i.e. the fix
+// INTERVAL *plus* the staleness with which fixes arrive — else, on a long gap, the target
+// hits the lead cap and the dot STALLS until the next fix (then the bounded corrector has to
+// claw back the whole stall). Measured midday (p90): interval tram 82 s, trolley 65 s, bus
+// 50 s, train 72 s, metro 14 s; staleness p90 ≈ 61 s on top. So lead ≈ p90(interval) +
+// p90(staleness) + margin. Lead is a MAX (only engaged when fixes are sparse), so a generous
+// value degrades gracefully toward faster cadence; the MAX_LEAD_KM + next-stop caps still bound
+// the actual excursion, so over-provisioning the time lead cannot dart or overrun a stop.
+const MAX_LEAD_MS_BY_MODE = { tram: 150000, trolleybus: 110000, bus: 95000, train: 120000, metro: 25000, ferry: 75000, funicular: 80000, cablecar: 80000, gondola: 80000, other: 80000 };
 const leadMs = (mode) => MAX_LEAD_MS_BY_MODE[mode] || 60000;
 const MAX_LEAD_KM = 1.5;       // absolute distance backstop for a stale/dead feed (raised from 0.9 so
                                // the per-mode TIME lead, not the distance, governs normal motion).
@@ -131,6 +134,8 @@ const convTau = (mode) => CONV_TAU_MS_BY_MODE[mode] || 15000;
 const SD_MOVE_KM = 0.012;      // a fix advancing < this (≈12 m) is treated as stationary → hold
 const APPROACH_KM = 0.05;      // within this distance of the NEXT STOP, ease the velocity down so a
                                // vehicle DECELERATES into the stop (gated to real stops, NOT the lead cap).
+const SD_PARK_KM = 0.010;      // final ~10 m of that approach (or any distance while dwelling): decay the
+                               // velocity fully to ZERO so the dot PARKS at the platform, not creeps onto it.
 // Per-mode chainage-speed ceiling (km/h) — clamps only the velocity ESTIMATE so a
 // single glitchy fix can't inject an absurd predicted speed. Real motion is
 // governed by the measured EMA; this is just a sanity ceiling.
@@ -1325,7 +1330,16 @@ function applySnapshot(snap) {
         // "backward teleport"). Backward GPS noise → vActual 0 ⇒ a brief hold/coast.
         const vActual = Math.max(0, dSd) / Math.max(dt, 1); // km/ms, never negative
         const vClamped = Math.min(vActual, vmaxKmMs(ex.props.mode));
-        ex.vSd = lerp(ex.vSd != null ? ex.vSd : vClamped, vClamped, V_EMA);
+        // Metro: the feed is dense (~5 s) and synthetic-feeling, so a fresh per-fix
+        // self-estimate passes a ~24 km/h speed swing that the corrector renders as
+        // jitter. The worker carries a cross-tick median+EMA of the SAME chainage speed
+        // (source.js VSD_MEDIAN_MODES), so for metro we render that smoothed value
+        // directly instead of the noisy self-estimate. Other modes self-estimate as before.
+        if (ex.props.mode === 'metro' && typeof nv.vsd === 'number') {
+          ex.vSd = Math.min(Math.max(0, nv.vsd), vmaxKmMs(ex.props.mode));
+        } else {
+          ex.vSd = lerp(ex.vSd != null ? ex.vSd : vClamped, vClamped, V_EMA);
+        }
         ex.sdTarget = nv.sd;
         dbgBranch = dSd < -1e-9 ? 'hold-back' : (dSd < SD_MOVE_KM ? 'hold' : 'glide');
       }
@@ -1497,7 +1511,14 @@ function stepMotion(ts) {
     // NOT the always-present stale-feed lead cap, which would freeze-lurch the sparse-fix trams.
     if (stopAhead && v.vRender > 0) {
       const toStop = nsSd - v.sd;
-      if (toStop > 0 && toStop < APPROACH_KM) v.vRender *= Math.max(0.18, toStop / APPROACH_KM);
+      if (toStop > 0 && toStop < APPROACH_KM) {
+        const frac = toStop / APPROACH_KM;
+        // A DWELLING vehicle (at_stop), or one in the final metres, decays to ZERO so it
+        // PARKS at the platform instead of creeping onto it. A still-moving approach keeps
+        // the 0.18 floor so it doesn't look frozen 50 m out before it's actually there.
+        const park = v.dwell || toStop < SD_PARK_KM;
+        v.vRender *= park ? frac : Math.max(0.18, frac);
+      }
     }
     // Integrate. Forward-biased; a behind-landing fix never reverses the render.
     v.sd += v.vRender * dt;
