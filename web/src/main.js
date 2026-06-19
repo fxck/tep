@@ -81,9 +81,10 @@ const SNAP_HARD_M = 1500;     // ≈ CATCHUP_MPS·SMOOTH_MAX_MS: only a GPS-glit
 // The vehicle no longer FREEZES between the sparse (~40s) fixes: it dead-reckons
 // FORWARD along the shape at an estimated chainage speed (vSd, an EMA of recent
 // Δsd/Δt), then reconciles when the next fix lands. Reconciliation is
-// FORWARD-ONLY — a fix that lands BEHIND the predicted position never yanks the
-// vehicle backward (the old "teleport"); the render holds and lets the
-// dead-reckoned truth catch back up. Two guards stop runaway prediction:
+// ERROR-PROPORTIONAL (see CATCHUP_TAU_MS / BACK_TAU_MS below): behind truth → speed
+// up by an amount that scales with the gap (small lag = gentle, big lag = fast eased
+// slide); ahead of truth → ease back at a low-capped rate so a rail vehicle corrects
+// by adjusting speed, never a backward jump. Two guards stop runaway prediction:
 //   • DWELL gate — state_position 'at_stop' ⇒ speed 0, so it PARKS at a stop
 //     instead of sailing through it (the overshoot that used to snap back).
 //   • LEAD cap — predict at most MAX_LEAD_MS / MAX_LEAD_KM past the last confirmed
@@ -101,9 +102,23 @@ const CHASE_FLOOR = 0.28;      // The render chases the dead-reckoned target at 
                                // Capping the chase at cruise (not 1.2×vmax, and certainly not the old
                                // flat 55 m/s ≈198 km/h) is the real fix for "moves stupidly fast":
                                // vehicles were chronically pegged at the catch-up cap, not cruising.
-const BACK_EASE_FRAC = 0.22;   // when a real fix lands BEHIND the prediction, ease the render back
-                               // toward truth at this fraction of vmax (≈4 m/s for a tram) — the gentle
-                               // "autocorrection" the forward-only hold lacked; never a backward jump.
+// --- ERROR-PROPORTIONAL reconciliation (replaces the old flat-rate chase) ---
+// stepMotion reconciles the rendered chainage v.sd toward the dead-reckoned truth
+// sdReal with ONE proportional law, so "catch up a little" and "catch up a lot"
+// fall out of the same formula instead of a hard threshold:
+//   BEHIND (sdReal > v.sd): chase forward at max(vEff, floor, err/CATCHUP_TAU). The
+//     err/TAU term makes a small lag a gentle speed-up and a large lag a fast eased
+//     slide that closes in ~CATCHUP_TAU (a "smooth teleport" — decelerating as it
+//     arrives, never an instant jump). Capped at MAX_CATCHUP_MULT×vmax.
+//   AHEAD  (sdReal < v.sd): we over-predicted. Ease the render BACK at gap/BACK_TAU,
+//     capped LOW (MAX_BACK_MULT×vmax) so a rail vehicle corrects by adjusting speed,
+//     never appearing to reverse fast — and never a backward teleport.
+// Genuine trip/shape discontinuity (> SD_SNAP_KM, or a backward jump > SD_BACK_KM)
+// is still an INSTANT snap, handled at ingest (applySnapshot), not here.
+const CATCHUP_TAU_MS = 550;    // behind-gap closes on ~this time constant (smooth-teleport speed)
+const MAX_CATCHUP_MULT = 12;   // …but never faster than this ×vmax (keeps a big slide perceptible)
+const BACK_TAU_MS = 1100;      // ahead-overshoot eases back on ~this (gentler than catch-up)
+const MAX_BACK_MULT = 0.45;    // …capped LOW so a tram never looks like it reverses fast
 const SD_MOVE_KM = 0.012;      // a fix advancing < this (≈12 m) is treated as stationary → hold
 const APPROACH_KM = 0.05;      // within this distance of the next-stop bound, ease the chase rate down
                               // so a vehicle DECELERATES into the stop instead of slamming to a halt.
@@ -249,10 +264,95 @@ async function fetchMissingShapes(ids) {
       const r = await fetch(`${API_BASE}/api/shapes?ids=${chunk.join(',')}`);
       if (!r.ok) { chunk.forEach((id) => shapes.delete(id)); return; }
       const data = await r.json();
-      for (const id of chunk) shapes.set(id, buildShape(data[id]));
+      const toCache = new Map();
+      for (const id of chunk) {
+        shapes.set(id, buildShape(data[id]));
+        if (data[id] && data[id].length) toCache.set(id, data[id]);   // persist RAW geometry
+      }
+      if (toCache.size) idbPutShapes(toCache);                          // survive refresh (IndexedDB)
       routesDirty = true;
     } catch { chunk.forEach((id) => shapes.delete(id)); }
   }));
+}
+
+// --- IndexedDB shape cache --------------------------------------------------
+// Static GTFS geometry survives a refresh locally. WHY: /api/shapes is HTTP-cacheable
+// for 24 h, but the cache key is the whole `?ids=` batch URL, and the batch composition
+// shifts as the live fleet changes — so a refresh is a near-total cache MISS that
+// re-downloads ~3.8 MB / ~1.2 s, during which every routed vehicle holds frozen at its
+// last fix. Keyed per shape_id in IndexedDB, a refresh hydrates geometry in ~ms and
+// motion starts at once (the snapshot already carries sd+vsd). Busted only when the
+// server's gtfs_meta.last_ingest (surfaced as meta.gtfsVersion) changes — i.e. when
+// PID republishes its GTFS feed.
+const IDB_NAME = 'tep', IDB_SHAPES = 'shapes', IDB_META = 'meta';
+let _idb = null;
+function idbOpen() {
+  return new Promise((resolve) => {
+    if (_idb || typeof indexedDB === 'undefined') return resolve(_idb);
+    let req;
+    try { req = indexedDB.open(IDB_NAME, 1); } catch { return resolve(null); }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_SHAPES)) db.createObjectStore(IDB_SHAPES);
+      if (!db.objectStoreNames.contains(IDB_META)) db.createObjectStore(IDB_META);
+    };
+    req.onsuccess = () => { _idb = req.result; resolve(_idb); };
+    req.onerror = () => resolve(null);
+  });
+}
+function idbStore(name, mode) {
+  try { return _idb ? _idb.transaction(name, mode).objectStore(name) : null; } catch { return null; }
+}
+function idbGetAllShapes() {
+  return new Promise((resolve) => {
+    const os = idbStore(IDB_SHAPES, 'readonly'); if (!os) return resolve(null);
+    const out = new Map();
+    const cur = os.openCursor();
+    cur.onsuccess = (e) => { const c = e.target.result; if (c) { out.set(c.key, c.value); c.continue(); } else resolve(out); };
+    cur.onerror = () => resolve(out);
+  });
+}
+function idbPutShapes(map) {
+  const os = idbStore(IDB_SHAPES, 'readwrite'); if (!os) return;
+  try { for (const [k, v] of map) os.put(v, k); } catch { /* quota / db closing */ }
+}
+function idbClearShapes() { const os = idbStore(IDB_SHAPES, 'readwrite'); if (os) try { os.clear(); } catch {} }
+function idbGetMeta(k) {
+  return new Promise((resolve) => {
+    const os = idbStore(IDB_META, 'readonly'); if (!os) return resolve(null);
+    const r = os.get(k); r.onsuccess = () => resolve(r.result); r.onerror = () => resolve(null);
+  });
+}
+function idbPutMeta(k, v) { const os = idbStore(IDB_META, 'readwrite'); if (os) try { os.put(v, k); } catch {} }
+
+// Hydrate the in-memory shape map from IDB BEFORE the first snapshot (optimistic — a
+// warm refresh routes vehicles instantly), then validate the GTFS epoch in the
+// background and drop the cache if PID has republished since it was written.
+async function initShapeCache() {
+  await idbOpen();
+  if (!_idb) return;
+  try {
+    const cached = await idbGetAllShapes();
+    if (cached) for (const [id, raw] of cached) { if (!shapes.has(id)) shapes.set(id, buildShape(raw)); }
+    if (cached && cached.size) routesDirty = true;
+  } catch { /* ignore — fall through to the network path */ }
+  validateShapeCache();   // NOT awaited: never delay first paint on the version check
+}
+async function validateShapeCache() {
+  try {
+    const r = await fetch(`${API_BASE}/api/meta`); if (!r.ok) return;
+    const ver = (await r.json()).gtfsVersion;
+    if (!ver) return;
+    const stored = await idbGetMeta('gtfsVersion');
+    if (stored == null) { idbPutMeta('gtfsVersion', ver); return; }   // first run: record, don't wipe
+    if (stored !== ver) {
+      // PID republished GTFS — cached geometry may be stale. Drop the store and clear
+      // the in-memory map so the next snapshot tick re-fetches fresh shapes (one slow
+      // refresh, warm again thereafter).
+      idbClearShapes(); idbPutMeta('gtfsVersion', ver);
+      shapes.clear(); routesDirty = true;
+    }
+  } catch { /* offline / no meta — keep using the cache */ }
 }
 
 // --- interpolation state ----------------------------------------------------
@@ -1363,24 +1463,33 @@ function stepMotion(ts) {
     if (sdReal > cap) sdReal = cap;
     if (total != null && sdReal > total) sdReal = total;
 
-    // FORWARD-ONLY chase, capped at the vehicle's OWN predicted speed (vEff) so a
-    // dot never renders faster than the vehicle moves; a fraction-of-vmax FLOOR
-    // lets a just-departed vehicle pull away. A target behind the render simply
-    // HOLDS (never reverses). Ease the rate down inside APPROACH_KM of the bound
-    // so the vehicle decelerates into the stop rather than slamming to a halt.
-    if (sdReal > v.sd) {
-      let rateKmMs = Math.max(vEff, vmaxKmMs(v.props && v.props.mode) * CHASE_FLOOR);
+    // UNIFIED ERROR-PROPORTIONAL reconciliation. err = how far the dead-reckoned
+    // truth is from the rendered chainage; its SIGN picks the regime, its MAGNITUDE
+    // picks the speed — so "catch up a little" and "smooth-teleport a lot" are one law.
+    const err = sdReal - v.sd;
+    const vmax = vmaxKmMs(v.props && v.props.mode);
+    if (err > 0) {
+      // BEHIND truth → chase FORWARD. Base = the vehicle's own speed (or the
+      // just-departed CHASE_FLOOR); the err/CATCHUP_TAU term adds catch-up that
+      // SCALES with the gap — a small lag is a gentle speed-up, a large lag a fast
+      // eased slide that closes in ~CATCHUP_TAU (decelerating as it arrives, since
+      // the term shrinks with err). Capped so a huge gap stays a perceptible slide,
+      // not an instant jump. Ease down inside APPROACH_KM of the bound so the vehicle
+      // decelerates INTO the next stop rather than slamming to a halt.
+      let rateKmMs = Math.max(vEff, vmax * CHASE_FLOOR, err / CATCHUP_TAU_MS);
+      rateKmMs = Math.min(rateKmMs, vmax * MAX_CATCHUP_MULT);
       const toCap = cap - v.sd;
       if (toCap > 0 && toCap < APPROACH_KM) rateKmMs *= Math.max(0.18, toCap / APPROACH_KM);
-      v.sd += Math.min(sdReal - v.sd, rateKmMs * dt);
-    } else if (sdReal < v.sd) {
-      // AUTOCORRECTION: a real fix landed BEHIND the prediction (we over-shot — the
-      // vehicle slowed/stopped more than estimated). Ease the render back toward truth
-      // at a slow, capped rate — a gentle slide, NOT the old backward teleport — so a
-      // fix visibly corrects an over-predicted dot instead of holding it ahead until
-      // forward motion eventually catches up. Bounded by the gap so it never overshoots.
-      const backRate = vmaxKmMs(v.props && v.props.mode) * BACK_EASE_FRAC;
-      v.sd -= Math.min(v.sd - sdReal, backRate * dt);
+      v.sd += Math.min(err, rateKmMs * dt);
+    } else if (err < 0) {
+      // AHEAD of truth (we over-predicted — the vehicle slowed/stopped more than
+      // estimated) → ease the render BACK by adjusting speed only. Rate scales with
+      // the overshoot but is capped LOW (MAX_BACK_MULT×vmax) so a rail vehicle never
+      // appears to reverse fast — a subtle settle, never a backward teleport. Bounded
+      // by the gap so it can't overshoot truth.
+      const gap = -err;
+      const backRate = Math.min(gap / BACK_TAU_MS, vmax * MAX_BACK_MULT);
+      v.sd -= Math.min(gap, backRate * dt);
     }
     if (total != null && v.sd > total) v.sd = total;
   }
@@ -1727,6 +1836,7 @@ function setConn(ok) { statsSlice.patch({ conn: !!ok }); }
 
 async function start() {
   if (!API_BASE) { statsSlice.patch({ src: 'noapi', conn: false }); return; }
+  await initShapeCache();   // hydrate cached geometry first → routed vehicles move at once
   try { const r = await fetch(`${API_BASE}/api/vehicles`); if (r.ok) applySnapshot(await r.json()); } catch {}
   connectSSE();
 }
