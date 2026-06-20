@@ -1807,9 +1807,22 @@ function reconcileRail(ts) {
 }
 
 let lastDraw = 0;
+const RESUME_GAP_MS = 4000;   // rAF paused longer than this ⇒ the tab was backgrounded
 function animate(ts) {
   requestAnimationFrame(animate);
-  if (!mapReady || ts - lastDraw < DRAW_INTERVAL) return;
+  if (!mapReady) return;
+  // RESUME GUARD. A backgrounded tab (other tab, phone lock, app-switch, bfcache restore)
+  // pauses rAF entirely, so the render froze where it was while live vehicles kept moving —
+  // the "positions are way off when I come back" report. A long inter-frame gap is the
+  // UNIVERSAL signal (fires regardless of whether visibilitychange / pageshow did, and
+  // regardless of whether the SSE stream stalled): jump straight to live via resyncLive
+  // (refetch + resnap) instead of dead-reckoning across the gap or crawling back.
+  if (lastDraw && ts - lastDraw > RESUME_GAP_MS) {
+    lastDraw = ts;
+    if (!replayActive) resyncLive();
+    return;
+  }
+  if (ts - lastDraw < DRAW_INTERVAL) return;
   lastDraw = ts;
   if (replayActive) return;       // Time Machine owns the view; the live layer is muted
   if (routesDirty) { rebuildRoutes(); routesDirty = false; }
@@ -2145,13 +2158,17 @@ function connectSSE() {
 // RESNAP (stepMotion jumps it to its dead-reckoned truth this frame, no catch-up).
 // Used by the visibility handler (return from a backgrounded/locked tab) and the
 // "Live" pill. Idempotent + cheap.
+let resyncing = false;
 async function resyncLive() {
   for (const v of fleet.values()) { v.resnap = true; v.motT = null; }   // snap immediately to current estimate
+  statsSlice.patch({ stale: false });
+  if (resyncing) return;                 // coalesce concurrent triggers (frame-gap + visibility/pageshow)
+  resyncing = true;
   try {
     const r = await fetch(`${API_BASE}/api/vehicles`, { cache: 'no-store' });
     if (r.ok) { applySnapshot(await r.json()); for (const v of fleet.values()) v.resnap = true; }  // re-snap to the newest fixes
   } catch { /* keep the immediate resnap */ }
-  statsSlice.patch({ stale: false });
+  finally { resyncing = false; }
 }
 
 // Backgrounded tabs (phone lock, app switch) freeze requestAnimationFrame; on return
