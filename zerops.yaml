@@ -81,18 +81,15 @@ zerops:
     build:
       base: nodejs@24
       buildCommands:
-        - cd web && npm install
-        - cd web && npm run build
-      deployFiles: ["."]            # self-deploy → whole monorepo
+        - cd web && npm install      # dev: PREINSTALL deps only — no app build.
+        # The live site is served by `vite dev` (via zerops_dev_server), not the
+        # nginx-served dist, so building here would just be wasted work. The agent
+        # edits the mounted tree and drives the dev server; node_modules is ready.
+      deployFiles: ["."]            # self-deploy → whole monorepo (src on the container)
       cache: ["web/node_modules"]
-      envVariables:
-        VITE_API_BASE: ${apidev_zeropsSubdomain}
-        # Phase-glTF only (NOT used by v1 procedural meshes): public CDN/base URL of
-        # the `storage` object-storage service. Confirm the key via zerops_env, then uncomment.
-        # VITE_ASSET_BASE: ${storage_apiUrl}
     run:
       base: nginx@1.22
-      documentRoot: web/dist         # built site stays under the subdir with [.]
+      documentRoot: web/dist         # placeholder; real serving is vite dev on its own port
 
   - setup: webprod
     build:
